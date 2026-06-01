@@ -8,4 +8,4 @@ Group number: Group01
 |---|---|
 | Person A | TCP communication, packet reconstruction, buffering |
 | Person B | PySide6 GUI, VisPy live plotting, channel selection |
-| Person C | Signal processing, offline Matplotlib plot, documentation |
+| Lan Luo | Signal processing, offline Matplotlib plot, documentation |
