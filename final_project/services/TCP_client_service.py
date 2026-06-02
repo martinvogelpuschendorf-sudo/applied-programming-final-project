@@ -5,6 +5,9 @@ from PySide6.QtCore import QObject, Signal
 
 class EMGTCPClient(QObject):
     status_updated = Signal(str)
+    # Used to notify the ViewModel of current connection status or error messages
+    data_ready = Signal()
+    # Used to notify the ViewModel that new packets have been reconstructed and are ready for plotting
 
     def __init__(self, host='localhost', port=12345):
         super().__init__()
@@ -14,34 +17,40 @@ class EMGTCPClient(QObject):
         self.client_socket = None
         self.is_connected = False
 
-        # Buffering: Use a dynamic bytearray to temporarily pool incoming streaming data
+
+        # Buffer Design
         self.byte_buffer = bytearray()
-
-        self.data_buffer = np.empty((32, 0), dtype=np.float64)
-
-        # Packet Reconstruction Specification
         self.TARGET_BYTES = 4608
 
+        self.all_packets = []
+        self.live_pointer = 0
+
+    # Connection Control (TCP communication)
     def connect(self):
-        """Connect to the TCP server and configure non-blocking state."""
+
         if self.is_connected:
-            return
+            return True
 
         try:
             self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.client_socket.connect((self.host, self.port))
 
-            # Set the socket to non-blocking mode to seamlessly integrate with GUI event loops
+            # Set the socket to non-blocking mode
             self.client_socket.setblocking(False)
 
             self.is_connected = True
             self.status_updated.emit("Connected successfully to server.")
+
         except Exception as e:
             self.is_connected = False
-            self.status_updated.emit(f"Connection failed: {e}")
+            self.status_updated.emit(
+                f"Connection failed: {e}")
+            return False
 
     def disconnect(self):
-        """Securely close the active network socket and reset connection states."""
+        if not self.is_connected:
+            return
+
         self.is_connected = False
         if self.client_socket is not None:
             try:
@@ -49,64 +58,76 @@ class EMGTCPClient(QObject):
             except Exception:
                 pass
             self.client_socket = None
-        self.status_updated.emit("Client disconnected. Playback finished.")
+        self.status_updated.emit("Client disconnected. Playback finished.")  # Notify front-end of secure disconnection
 
+    # Data Retrieval & Streaming Interface (TCP communication)
     def receive_data(self):
-
-        # If disconnected, return immediately and do not attempt auto-reconnect (Exercise Specification)
         if not self.is_connected or self.client_socket is None:
             return
 
-        # Continuous read loop to drain the network interface buffer completely
         while True:
             try:
                 new_bytes = self.client_socket.recv(4096)
 
-                # ROBUSTNESS: Handle 'Connection is lost' (Server closed the connection after playback)
                 if not new_bytes:
-                    self.status_updated.emit("Server finished playback. Disconnecting...")
+                    self.status_updated.emit(
+                        "Server finished playback. Disconnecting...")
                     self.disconnect()
                     return
 
                 self.byte_buffer.extend(new_bytes)
 
             except BlockingIOError:
-                # No more data is available in the network socket right now.
                 break
             except Exception as e:
-                self.status_updated.emit(f"Read error: {e}")
+                self.status_updated.emit(
+                    f"Read error: {e}")
                 self.disconnect()
                 return
 
         self._extract_packets()
 
+
+    # Packet Processing (Packet reconstruction)
     def _extract_packets(self):
+        has_new_data = False
 
-        packets = []
-
-        # Packet Reconstruction (Handling Clumping & Fragmentation)
-        # Keep slicing complete frames as long as the pool holds enough bytes
         while len(self.byte_buffer) >= self.TARGET_BYTES:
             packet_bytes = self.byte_buffer[:self.TARGET_BYTES]
-
             del self.byte_buffer[:self.TARGET_BYTES]
 
-            packet = np.frombuffer(packet_bytes, dtype=np.float64)
+            packet = np.frombuffer(packet_bytes, dtype=np.float64).reshape(32, 18)
 
-            packet = packet.reshape(32, 18)
+            self.all_packets.append(packet)
+            has_new_data = True
 
-            packets.append(packet)
+        if has_new_data:
+            self.data_ready.emit()
 
-        if len(packets) == 0:
-            return
+    # Data Streaming API (Buffering / Core Buffer Management)
+    def get_latest_live_data(self):
+        """
+        For VisPy rolling time window
+        Returns all new data segments accumulated since the last read and advances the read pointer.
+        """
+        if self.live_pointer >= len(self.all_packets):
+            return np.empty((32, 0), dtype=np.float64)
 
-        new_data = np.concatenate(packets, axis=1)
+        new_segments = self.all_packets[self.live_pointer:]
+        self.live_pointer = len(self.all_packets)
+        return np.concatenate(new_segments, axis=1)
 
-        self.data_buffer = np.concatenate((self.data_buffer, new_data), axis=1)
+    def get_all_offline_data(self):
+        """
+        For Matplotlib offline analysis & signal processing called after disconnecting.
+        Returns the complete, non-fragmented raw historical data from connection start to stop.
+        """
+        if not self.all_packets:  # Error handling: Raise an exception if no data was recorded before stopping
+            raise ValueError("No data available for offline plotting.")
 
-    def get_latest_data(self):
+        return np.concatenate(self.all_packets, axis=1)
 
-        current_data = self.data_buffer
-
-        self.data_buffer = np.empty((32, 0), dtype=np.float64)
-        return current_data
+    def clear_buffers(self):
+        self.all_packets.clear()
+        self.live_pointer = 0
+        self.byte_buffer.clear()
