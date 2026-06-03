@@ -4,8 +4,12 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from viewmodels.main_view_model import MainViewModel
-from views.main_view import MainView
+try:
+    from .viewmodels.main_view_model import MainViewModel
+    from .views.main_view import MainView
+except ImportError:
+    from viewmodels.main_view_model import MainViewModel
+    from views.main_view import MainView
 
 
 def main() -> int:
