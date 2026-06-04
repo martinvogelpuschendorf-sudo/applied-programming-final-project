@@ -52,12 +52,13 @@ class MainViewModel(QObject):
         super().__init__()
         self.status_text = "Disconnected."
         self.sample_rate = 1000.0
-        # Keep ten seconds of live data because the VisPy plot displays a
-        # ten-second window. If this buffer is shorter, the plot necessarily
-        # leaves part of the canvas empty.
+        # Keep enough live data for the selected rolling display window. If
+        # this buffer is shorter than the visible duration, the plot
+        # necessarily leaves part of the canvas empty until enough samples have
+        # arrived.
         self.live_window_samples = int(self.sample_rate * 10)
         self.selected_channel = 0
-        self.signal_mode = "Original"
+        self.signal_mode = "Filtered"
         self.recorded_data = np.empty((self.CHANNEL_COUNT, 0), dtype=np.float64)
 
         # The client receives data from a TCP server. The View never touches
@@ -143,12 +144,21 @@ class MainViewModel(QObject):
         self._emit_current_live_data()
         self.offline_data_changed.emit(self._processed_recording())
 
+    def set_live_window_seconds(self, seconds: float) -> None:
+        """Update how much recent data is processed for the live plots."""
+        self.live_window_samples = max(2, int(float(seconds) * self.sample_rate))
+        self._emit_current_live_data()
+
     def request_offline_plot(self) -> None:
         """Ask the view to redraw offline data or show a friendly status message."""
         if self.recorded_data.shape[1] == 0:
             self._set_status("No recorded data available for offline plotting.")
             return
         self.offline_data_changed.emit(self._processed_recording())
+
+    def processed_recording(self) -> np.ndarray:
+        """Return the full recorded signal in the current display mode."""
+        return self._processed_recording()
 
     def _poll_tcp(self) -> None:
         """Read available TCP data and publish it to the plots."""
