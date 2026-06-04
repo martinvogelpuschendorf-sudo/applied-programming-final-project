@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 try:
+    from . import button_labels
     from .channel_drag_and_drop_menue import ChannelButton, ChannelDragAndDropMenu
     from .plotview import (
         AllChannelsDialog,
@@ -32,6 +34,7 @@ try:
         channel_color_css,
     )
 except ImportError:
+    from views import button_labels
     from views.channel_drag_and_drop_menue import ChannelButton, ChannelDragAndDropMenu
     from views.plotview import (
         AllChannelsDialog,
@@ -43,14 +46,22 @@ except ImportError:
 
 
 class PlotScrollArea(QScrollArea):
-    """Scroll area that lets plot canvases scroll with the mouse wheel."""
+    """Scroll area that keeps plot widgets sized to the visible channel limit.
+
+    MainView wraps both live VisPy and offline Matplotlib plots in this class.
+    It forwards viewport height changes into the plot widget so the selected
+    "Visible channels" setting can control when vertical scrolling appears.
+    """
 
     def __init__(self, parent: QWidget | None = None) -> None:
+        """Create an empty scroll area; ``set_plot_widget`` wires the plot later."""
         super().__init__(parent)
         self._plot_widget: QWidget | None = None
         self._wheel_widgets: list[QWidget] = []
+        self._external_horizontal_scrollbar: QScrollBar | None = None
 
     def set_plot_widget(self, plot_widget: QWidget, wheel_widgets: list[QWidget]) -> None:
+        """Install the plot widget and route wheel events from canvas children."""
         self._plot_widget = plot_widget
         self.setWidget(plot_widget)
         self._wheel_widgets = [plot_widget, *wheel_widgets]
@@ -58,18 +69,27 @@ class PlotScrollArea(QScrollArea):
             widget.installEventFilter(self)
         self._sync_plot_viewport_height()
 
+    def set_external_horizontal_scrollbar(self, scroll_bar: QScrollBar) -> None:
+        """Route horizontal wheel gestures to a companion time scrollbar."""
+        self._external_horizontal_scrollbar = scroll_bar
+
     def eventFilter(self, watched, event) -> bool:
+        """Convert mouse-wheel events on embedded canvases into scroll-area movement."""
         if watched in self._wheel_widgets and event.type() == QEvent.Type.Wheel:
+            if self._scroll_external_horizontal_from_wheel_event(event):
+                return True
             if self.verticalScrollBar().maximum() > 0:
                 self._scroll_from_wheel_event(event)
                 return True
         return super().eventFilter(watched, event)
 
     def resizeEvent(self, event) -> None:
+        """Resync plot height whenever the scroll viewport changes size."""
         super().resizeEvent(event)
         self._sync_plot_viewport_height()
 
     def _sync_plot_viewport_height(self) -> None:
+        """Tell compatible plot widgets how tall their visible viewport is."""
         if self._plot_widget is not None and hasattr(
             self._plot_widget,
             "set_visible_channel_viewport_height",
@@ -77,6 +97,7 @@ class PlotScrollArea(QScrollArea):
             self._plot_widget.set_visible_channel_viewport_height(self.viewport().height())
 
     def _scroll_from_wheel_event(self, event) -> None:
+        """Apply a wheel delta to this scroll area's vertical scrollbar."""
         pixel_delta = event.pixelDelta().y()
         if pixel_delta:
             scroll_delta = pixel_delta
@@ -84,6 +105,24 @@ class PlotScrollArea(QScrollArea):
             scroll_delta = event.angleDelta().y()
         self.verticalScrollBar().setValue(self.verticalScrollBar().value() - scroll_delta)
         event.accept()
+
+    def _scroll_external_horizontal_from_wheel_event(self, event) -> bool:
+        """Use trackpad horizontal scroll or Shift+wheel for offline time panning."""
+        scroll_bar = self._external_horizontal_scrollbar
+        if scroll_bar is None or not scroll_bar.isVisible() or scroll_bar.maximum() <= 0:
+            return False
+
+        pixel_delta = event.pixelDelta()
+        angle_delta = event.angleDelta()
+        scroll_delta = pixel_delta.x() or angle_delta.x()
+        if not scroll_delta and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            scroll_delta = pixel_delta.y() or angle_delta.y()
+        if not scroll_delta:
+            return False
+
+        scroll_bar.setValue(scroll_bar.value() - scroll_delta)
+        event.accept()
+        return True
 
 
 class MainView(QMainWindow):
@@ -95,6 +134,7 @@ class MainView(QMainWindow):
     """
 
     def __init__(self, view_model) -> None:
+        """Create widgets, connect them to MainViewModel, and cache plot state."""
         super().__init__()
 
         # Keep a reference to the ViewModel so button callbacks can invoke
@@ -114,19 +154,24 @@ class MainView(QMainWindow):
         self._is_server_running = False
         self._offline_uses_total_time_window = True
         self._offline_scroll_syncing = False
+        self._latest_offline_request_id = 0
+        self._last_offline_auto_refresh_time = 0.0
+        self._offline_follow_live = True
+        self._offline_scroll_pause_until = 0.0
 
-        self.setWindowTitle("MyoFlow EMG Reader")
+        self.setWindowTitle(button_labels.WINDOW_TITLE)
         self.resize(1200, 820)
 
         # Plot widgets live in plotview.py. Keeping them separate makes this
         # file mostly about layout and user interaction.
-        self.single_plot = VisPySignalPlot("Selected Channel")
-        self.all_channels_plot = VisPySignalPlot("All Channels")
+        self.single_plot = VisPySignalPlot(button_labels.LIVE_PLOT_TITLE)
+        self.all_channels_plot = VisPySignalPlot(button_labels.ALL_CHANNELS_PLOT_TITLE)
         self.offline_plot = OfflineMatplotlibPlot()
         self.all_channels_dialog = AllChannelsDialog(self.all_channels_plot, self)
-        self.offline_refresh_timer = QTimer(self)
-        self.offline_refresh_timer.setInterval(1000)
-        self.offline_refresh_timer.timeout.connect(self._refresh_offline_plot)
+        self.offline_request_timer = QTimer(self)
+        self.offline_request_timer.setSingleShot(True)
+        self.offline_request_timer.setInterval(150)
+        self.offline_request_timer.timeout.connect(self._request_offline_plot)
         self.live_redraw_timer = QTimer(self)
         self.live_redraw_timer.setSingleShot(True)
         self.live_redraw_timer.setInterval(75)
@@ -173,9 +218,9 @@ class MainView(QMainWindow):
         self.port_input = QLineEdit("12345")
         self.host_input.setFixedWidth(130)
         self.port_input.setFixedWidth(130)
-        self.start_server_button = QPushButton("Start TCP server")
+        self.start_server_button = QPushButton(button_labels.START_TCP_SERVER)
         self.start_server_button.setFixedSize(130, 86)
-        self.connect_button = QPushButton("Connect\nto TCP server")
+        self.connect_button = QPushButton(button_labels.CONNECT_TO_TCP_SERVER)
         self.connect_button.setFixedSize(130, 86)
         self.connection_info_label = QLabel()
         self.connection_info_label.setMinimumWidth(220)
@@ -192,8 +237,8 @@ class MainView(QMainWindow):
 
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-        form.addRow("Host", self.host_input)
-        form.addRow("TCP Port", self.port_input)
+        form.addRow(button_labels.HOST_LABEL, self.host_input)
+        form.addRow(button_labels.TCP_PORT_LABEL, self.port_input)
 
         right_connection_layout = QHBoxLayout()
         right_connection_layout.setSpacing(8)
@@ -207,24 +252,24 @@ class MainView(QMainWindow):
         # with the shared left-side button column.
         controls_layout = QHBoxLayout()
         self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["Original", "RMS", "Filtered"])
-        self.mode_combo.setCurrentText("Filtered")
+        self.mode_combo.addItems(button_labels.SIGNAL_MODE_OPTIONS)
+        self.mode_combo.setCurrentText(button_labels.DEFAULT_SIGNAL_MODE)
         self.visible_channels_combo = QComboBox()
-        self.visible_channels_combo.addItems(["1", "2", "4", "6", "8", "12", "16", "All"])
-        self.visible_channels_combo.setCurrentText("4")
+        self.visible_channels_combo.addItems(button_labels.VISIBLE_CHANNEL_OPTIONS)
+        self.visible_channels_combo.setCurrentText(button_labels.DEFAULT_VISIBLE_CHANNELS)
         self.visible_channels_combo.setFixedWidth(72)
         self.time_window_combo = QComboBox()
-        self.time_window_combo.addItems(["5 s", "10 s", "20 s", "30 s", "60 s"])
-        self.time_window_combo.setCurrentText("10 s")
+        self.time_window_combo.addItems(button_labels.TIME_WINDOW_OPTIONS)
+        self.time_window_combo.setCurrentText(button_labels.DEFAULT_TIME_WINDOW)
         self.time_window_combo.setFixedWidth(76)
-        self.plot_all_button = QPushButton("Plot All Channels")
+        self.plot_all_button = QPushButton(button_labels.PLOT_ALL_CHANNELS)
 
         controls_layout.addStretch(1)
-        controls_layout.addWidget(QLabel("Signal Mode"))
+        controls_layout.addWidget(QLabel(button_labels.SIGNAL_MODE_LABEL))
         controls_layout.addWidget(self.mode_combo)
-        controls_layout.addWidget(QLabel("Visible channels"))
+        controls_layout.addWidget(QLabel(button_labels.VISIBLE_CHANNELS_LABEL))
         controls_layout.addWidget(self.visible_channels_combo)
-        controls_layout.addWidget(QLabel("Time window"))
+        controls_layout.addWidget(QLabel(button_labels.TIME_WINDOW_LABEL))
         controls_layout.addWidget(self.time_window_combo)
         controls_layout.addWidget(self.plot_all_button)
 
@@ -267,7 +312,7 @@ class MainView(QMainWindow):
         self.live_plot_scroll.set_plot_widget(self.single_plot, [self.single_plot.canvas.native])
         live_layout.addWidget(self.live_plot_scroll, stretch=1)
         self._refresh_channel_button_styles()
-        self.tabs.addTab(live_tab, "Live")
+        self.tabs.addTab(live_tab, button_labels.LIVE_TAB_LABEL)
 
         offline_tab = QWidget()
         offline_layout = QVBoxLayout(offline_tab)
@@ -278,9 +323,14 @@ class MainView(QMainWindow):
         self.offline_plot_scroll.set_plot_widget(self.offline_plot, [self.offline_plot.canvas])
         offline_layout.addWidget(self.offline_plot_scroll)
         self.offline_time_scroll = QScrollBar(Qt.Orientation.Horizontal)
+        self.offline_time_scroll.setTracking(True)
         self.offline_time_scroll.setVisible(False)
         offline_layout.addWidget(self.offline_time_scroll)
-        self.tabs.addTab(offline_tab, "Offline")
+        self.offline_plot_scroll.set_external_horizontal_scrollbar(self.offline_time_scroll)
+        self.offline_plot_scroll.verticalScrollBar().valueChanged.connect(
+            self._offline_scroll_activity_detected
+        )
+        self.tabs.addTab(offline_tab, button_labels.OFFLINE_TAB_LABEL)
         content_layout = QHBoxLayout()
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(8)
@@ -292,7 +342,7 @@ class MainView(QMainWindow):
         footer_layout.setContentsMargins(0, 0, 0, 0)
         self.status_label = QLabel()
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        self.copyright_label = QLabel("© Luo Lan, YU-HSUAN KUO, Martin Vogel")
+        self.copyright_label = QLabel(button_labels.COPYRIGHT_LABEL)
         self.copyright_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.copyright_label.setStyleSheet("QLabel { color: #5f6368; font-size: 10px; }")
         footer_layout.addWidget(self.status_label, stretch=1)
@@ -304,7 +354,7 @@ class MainView(QMainWindow):
         # User actions: buttons and controls call ViewModel methods.
         self.start_server_button.clicked.connect(self._toggle_server_requested)
         self.connect_button.clicked.connect(self._toggle_connection_requested)
-        self.mode_combo.currentTextChanged.connect(self.view_model.set_signal_mode)
+        self.mode_combo.currentTextChanged.connect(self._signal_mode_changed)
         self.visible_channels_combo.currentTextChanged.connect(self._visible_channel_limit_changed)
         self.time_window_combo.currentTextChanged.connect(self._time_window_changed)
         self.offline_time_scroll.valueChanged.connect(self._offline_time_scroll_changed)
@@ -331,6 +381,12 @@ class MainView(QMainWindow):
             self.view_model.disconnect_from_server()
         else:
             self._start_server_then_connect()
+
+    def _signal_mode_changed(self, mode: str) -> None:
+        """Send mode changes to live processing and queue offline worker refresh."""
+        self.view_model.set_signal_mode(mode)
+        if self._offline_tab_is_visible():
+            self._schedule_offline_refresh()
 
     def _channel_placeholder_clicked(self) -> None:
         """Start the local server and connect when the empty channel panel is clicked."""
@@ -366,7 +422,7 @@ class MainView(QMainWindow):
             self.offline_plot.set_channel(self.selected_channel_indices[-1])
         self._schedule_live_redraw()
         if self._offline_tab_is_visible():
-            self._refresh_offline_plot()
+            self._schedule_offline_refresh()
 
     def _toggle_all_channels(self) -> None:
         """Select or deselect every currently available EMG channel."""
@@ -383,7 +439,7 @@ class MainView(QMainWindow):
         self._update_select_all_button()
         self._schedule_live_redraw()
         if self._offline_tab_is_visible():
-            self._refresh_offline_plot()
+            self._schedule_offline_refresh()
 
     def _refresh_channel_button_styles(self, channel_indices: list[int] | None = None) -> None:
         """Color channel buttons like their matching plot lines."""
@@ -439,8 +495,7 @@ class MainView(QMainWindow):
             if channel_index < self.available_channel_count
         ]
         if (
-            self._is_client_connected
-            and self.available_channel_count > 0
+            self.available_channel_count > 0
             and not self.selected_channel_indices
         ):
             self.selected_channel_indices = list(range(min(4, self.available_channel_count)))
@@ -452,7 +507,11 @@ class MainView(QMainWindow):
         """Style and label the bulk selection control."""
         available_indices = set(range(self.available_channel_count))
         all_selected = bool(available_indices) and set(self.selected_channel_indices) == available_indices
-        self.select_all_button.setText("Deselect all" if all_selected else "Select all")
+        self.select_all_button.setText(
+            button_labels.DESELECT_ALL_CHANNELS
+            if all_selected
+            else button_labels.SELECT_ALL_CHANNELS
+        )
         self.select_all_button.setStyleSheet(
             "QPushButton {"
             " color: #202124;"
@@ -468,26 +527,24 @@ class MainView(QMainWindow):
     def _update_connection_info(self) -> None:
         """Show the current TCP endpoint and measured stream metadata."""
         if not self._is_client_connected:
-            self.connection_info_label.setText(
-                "Connected to: --\n"
-                "Channels: --\n"
-                "Sampling rate: --\n"
-                "Time Recorded: --"
-            )
+            self.connection_info_label.setText(button_labels.CONNECTION_INFO_EMPTY)
             return
 
-        host = self.view_model.tcp_client.host
-        port = self.view_model.tcp_client.port
+        host = self.view_model.tcp_host
+        port = self.view_model.tcp_port
         has_received_samples = (
             self.latest_all_channels.ndim == 2 and self.latest_all_channels.shape[1] > 0
         )
         channel_text = str(self.latest_all_channels.shape[0]) if has_received_samples else "--"
         sample_rate = getattr(self.view_model, "sample_rate", self.single_plot.sample_rate)
         self.connection_info_label.setText(
-            f"Connected to: {host}:{port}\n"
-            f"Channels: {channel_text}\n"
-            f"Sampling rate: {sample_rate:g} Hz\n"
-            f"Time Recorded: {self.current_time:.1f} s"
+            button_labels.CONNECTION_INFO_TEMPLATE.format(
+                host=host,
+                port=port,
+                channel_count=channel_text,
+                sample_rate=sample_rate,
+                current_time=self.current_time,
+            )
         )
 
     def _blend_with_white(self, channel_index: int, opacity: float) -> str:
@@ -547,11 +604,11 @@ class MainView(QMainWindow):
         self.channel_drag_menu.set_channel_order(self.channel_order)
         self._schedule_live_redraw()
         if self._offline_tab_is_visible():
-            self._refresh_offline_plot()
+            self._schedule_offline_refresh()
 
     def _visible_channel_limit(self) -> int | None:
         text = self.visible_channels_combo.currentText()
-        if text == "All":
+        if text == button_labels.ALL_VISIBLE_CHANNELS_OPTION:
             return None
         return int(text)
 
@@ -562,10 +619,12 @@ class MainView(QMainWindow):
         self.offline_plot.set_visible_channel_limit(limit)
         self._schedule_live_redraw()
         if self._offline_tab_is_visible():
-            self._refresh_offline_plot()
+            self._schedule_offline_refresh()
 
     def _time_window_seconds(self) -> float:
-        return float(self.time_window_combo.currentText().removesuffix(" s"))
+        return float(
+            self.time_window_combo.currentText().removesuffix(button_labels.TIME_WINDOW_SUFFIX)
+        )
 
     def _time_window_changed(self) -> None:
         """Apply the selected time span to live, all-channel, and offline plots."""
@@ -576,20 +635,23 @@ class MainView(QMainWindow):
         self._offline_uses_total_time_window = False
         self.offline_plot.set_visible_duration_seconds(seconds)
         self.offline_plot.set_visible_window_start_seconds(0.0)
+        self._offline_follow_live = True
         self.offline_time_scroll.setValue(0)
         self._schedule_live_redraw()
         if self.all_channels_dialog.isVisible():
             self._redraw_all_channels_dialog()
         if self._offline_tab_is_visible():
-            self._refresh_offline_plot()
+            self._schedule_offline_refresh()
 
     def _offline_time_scroll_changed(self, value: int) -> None:
         """Scroll the finite offline time window through the recording."""
         if self._offline_scroll_syncing:
             return
+        self._offline_follow_live = False
         self.offline_plot.set_visible_window_start_seconds(value / 1000.0)
+        self.offline_plot.update_visible_x_range()
         if self._offline_tab_is_visible():
-            self._refresh_offline_plot()
+            self._schedule_offline_refresh()
 
     def _redraw_live_plots(self) -> None:
         """Redraw live plots from cached ViewModel data."""
@@ -615,19 +677,32 @@ class MainView(QMainWindow):
         """Enable/disable client buttons based on connection state."""
         self._is_client_connected = is_connected
         self.connect_button.setText(
-            "Disconnect\nfrom TCP server" if is_connected else "Connect\nto TCP server"
+            button_labels.DISCONNECT_FROM_TCP_SERVER
+            if is_connected
+            else button_labels.CONNECT_TO_TCP_SERVER
         )
         if not is_connected:
-            self.offline_refresh_timer.stop()
-            self.available_channel_count = 0
+            self.offline_request_timer.stop()
             self.latest_all_channels = np.empty((32, 0), dtype=np.float64)
             self.latest_single_channel = np.empty(0, dtype=np.float64)
-            self.current_time = 0.0
-            self._clear_channel_selection()
-            self._sync_available_channel_controls()
             self._schedule_live_redraw()
-            self.offline_plot.show_empty("No recorded data yet.")
-            self.offline_time_scroll.setVisible(False)
+            has_recording = self.view_model.recorded_sample_count > 0
+            if has_recording:
+                if self.available_channel_count == 0:
+                    self.available_channel_count = self.view_model.CHANNEL_COUNT
+                self.current_time = self.view_model.recorded_sample_count / self.view_model.sample_rate
+                # Keep channel buttons, selected channels, the offline scrollbar,
+                # and the current offline plot available after TCP disconnect.
+                self._sync_available_channel_controls()
+                if self._offline_tab_is_visible():
+                    self._schedule_offline_refresh()
+            else:
+                self.available_channel_count = 0
+                self.current_time = 0.0
+                self._clear_channel_selection()
+                self._sync_available_channel_controls()
+                self.offline_plot.show_empty(button_labels.OFFLINE_NO_RECORDING_MESSAGE)
+                self.offline_time_scroll.setVisible(False)
         else:
             self._sync_available_channel_controls()
         self._refresh_host_port_state()
@@ -636,7 +711,9 @@ class MainView(QMainWindow):
     def _set_server_running_state(self, is_running: bool) -> None:
         """Enable/disable server buttons based on local server state."""
         self._is_server_running = is_running
-        self.start_server_button.setText("Stop TCP server" if is_running else "Start TCP server")
+        self.start_server_button.setText(
+            button_labels.STOP_TCP_SERVER if is_running else button_labels.START_TCP_SERVER
+        )
         self._refresh_host_port_state()
 
     def _refresh_host_port_state(self) -> None:
@@ -667,6 +744,8 @@ class MainView(QMainWindow):
                 self._sync_available_channel_controls()
         self._update_connection_info()
         self._schedule_live_redraw()
+        if self._offline_tab_is_visible():
+            self._schedule_offline_refresh_from_recording(current_time)
 
     def _show_all_channels(self) -> None:
         """Open the all-channel overview using the latest cached live data."""
@@ -683,48 +762,97 @@ class MainView(QMainWindow):
             mode=self.mode_combo.currentText(),
         )
 
-    def _update_offline_plot(self, data: object) -> None:
-        """Redraw the Matplotlib offline plot for the selected channel/mode."""
-        offline_data = np.asarray(data)
+    def _update_offline_plot(self, request_id: int, payload: object) -> None:
+        """Render the newest worker-prepared offline plot payload.
+
+        ``MainViewModel.offline_data_changed`` carries the same request id that
+        ``_request_offline_plot`` received. If this slot sees an older id, the
+        user has already changed mode/channels/window, so the result is ignored.
+        """
+        if request_id != self._latest_offline_request_id:
+            return
+
+        result = payload if isinstance(payload, dict) else {}
+        offline_data = np.asarray(result.get("data", np.empty((0, 0), dtype=np.float64)))
+        x_values = np.asarray(result.get("x_values", np.empty(0, dtype=np.float64)))
+        channel_indices = list(result.get("channel_indices", []))
+        duration_seconds = float(result.get("recording_duration_seconds", 0.0))
         self._apply_offline_time_window()
-        self.offline_plot.plot(
+        self.offline_plot.plot_prepared(
             offline_data,
+            x_values,
             self.mode_combo.currentText(),
-            self._ordered_selected_channels(),
+            channel_indices,
+            duration_seconds,
         )
-        self._sync_offline_time_scroll(offline_data)
+        self._sync_offline_time_scroll(duration_seconds)
 
     def _tab_changed(self, index: int) -> None:
-        """Refresh offline data when entering/leaving the Offline tab."""
-        if self.tabs.tabText(index) == "Offline":
-            self._refresh_offline_plot()
-            self.offline_refresh_timer.start()
+        """Queue offline processing on entry and stop pending debounce on exit."""
+        if self.tabs.tabText(index) == button_labels.OFFLINE_TAB_LABEL:
+            self._offline_follow_live = True
+            self._schedule_offline_refresh()
         else:
-            self.offline_refresh_timer.stop()
+            self.offline_request_timer.stop()
 
     def _offline_tab_is_visible(self) -> bool:
-        return self.tabs.currentWidget() is not None and self.tabs.tabText(self.tabs.currentIndex()) == "Offline"
+        """Return whether async offline results should currently update the UI."""
+        return (
+            self.tabs.currentWidget() is not None
+            and self.tabs.tabText(self.tabs.currentIndex()) == button_labels.OFFLINE_TAB_LABEL
+        )
 
-    def _refresh_offline_plot(self) -> None:
-        """Redraw offline plots from the recorded per-channel signal."""
-        offline_data = self.view_model.processed_recording()
+    def _schedule_offline_refresh(self, restart: bool = True) -> None:
+        """Debounce offline processing requests so rapid UI changes coalesce.
+
+        User-driven changes restart the timer so the worker sees the final UI
+        state. Recording-driven refreshes do not restart an already pending
+        timer, otherwise continuous live samples could keep postponing it.
+        """
+        if restart or not self.offline_request_timer.isActive():
+            self.offline_request_timer.start()
+
+    def _schedule_offline_refresh_from_recording(self, current_time: float) -> None:
+        """Periodically refresh Offline while live recording continues."""
+        if time.monotonic() < self._offline_scroll_pause_until:
+            return
+        if current_time - self._last_offline_auto_refresh_time < 1.0:
+            return
+        self._last_offline_auto_refresh_time = current_time
+        window_seconds = self.offline_plot.visible_duration_seconds
+        if self._offline_follow_live and window_seconds is not None:
+            self.offline_plot.set_visible_window_start_seconds(
+                max(0.0, current_time - window_seconds)
+            )
+        self._schedule_offline_refresh(restart=False)
+
+    def _offline_scroll_activity_detected(self) -> None:
+        """Briefly pause auto-refresh so scroll interaction stays responsive."""
+        self._offline_scroll_pause_until = time.monotonic() + 0.75
+
+    def _request_offline_plot(self) -> None:
+        """Capture current UI options and ask ViewModel to process them off-thread."""
+        if time.monotonic() < self._offline_scroll_pause_until:
+            self._schedule_offline_refresh(restart=False)
+            return
         self._apply_offline_time_window()
-        self.offline_plot.plot(
-            offline_data,
+        self._latest_offline_request_id = self.view_model.request_offline_processing(
             self.mode_combo.currentText(),
             self._ordered_selected_channels(),
+            self.offline_plot.visible_duration_seconds,
+            self.offline_plot.visible_window_start_seconds,
+            max_points_per_channel=2000,
         )
-        self._sync_offline_time_scroll(offline_data)
 
     def _apply_offline_time_window(self) -> None:
+        """Mirror the time-window controls into the offline plot state."""
         if self._offline_uses_total_time_window:
             self.offline_plot.set_visible_duration_seconds(None)
         else:
             self.offline_plot.set_visible_duration_seconds(self._time_window_seconds())
 
-    def _sync_offline_time_scroll(self, data: object) -> None:
-        data = np.asarray(data)
-        duration_seconds = data.shape[1] / self.offline_plot.sample_rate if data.ndim == 2 else 0.0
+    def _sync_offline_time_scroll(self, duration_seconds: float) -> None:
+        """Update the horizontal offline scrollbar after a worker result returns."""
         window_seconds = self.offline_plot.visible_duration_seconds
         should_scroll = (
             not self._offline_uses_total_time_window
@@ -748,9 +876,10 @@ class MainView(QMainWindow):
         self._offline_scroll_syncing = False
 
     def closeEvent(self, event) -> None:
-        """Clean up sockets when the user closes the main window."""
-        self.offline_refresh_timer.stop()
+        """Stop timers, sockets, and worker threads before the window closes."""
+        self.offline_request_timer.stop()
         self.live_redraw_timer.stop()
         self.view_model.disconnect_from_server(announce=False)
         self.view_model.stop_tcp_server()
+        self.view_model.shutdown()
         super().closeEvent(event)

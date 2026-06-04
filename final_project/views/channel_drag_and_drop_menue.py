@@ -15,6 +15,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+try:
+    from . import button_labels
+except ImportError:
+    from views import button_labels
+
 
 class ClickableLabel(QLabel):
     """QLabel that emits a clicked signal."""
@@ -122,7 +127,7 @@ class ChannelDragAndDropMenu(QWidget):
         self.channel_layout.setContentsMargins(0, 0, 0, 0)
         self.channel_layout.setSpacing(5)
 
-        self.message_label = ClickableLabel("Connect to TCP server to display available EMG channels")
+        self.message_label = ClickableLabel(button_labels.CHANNEL_SELECTOR_CONNECT_MESSAGE)
         self.message_label.setWordWrap(True)
         self.message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.message_label.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -137,7 +142,7 @@ class ChannelDragAndDropMenu(QWidget):
             "}"
         )
 
-        self.select_all_button = QPushButton("Select all")
+        self.select_all_button = QPushButton(button_labels.SELECT_ALL_CHANNELS)
         self.select_all_button.setMinimumHeight(34)
         self.select_all_button.clicked.connect(self.select_all_clicked)
 
@@ -158,7 +163,9 @@ class ChannelDragAndDropMenu(QWidget):
         self.channel_buttons: dict[int, ChannelButton] = {}
         for channel_index in range(channel_count):
             button = ChannelButton(channel_index)
-            button.setText(f"Channel {channel_index + 1}")
+            button.setText(
+                button_labels.CHANNEL_BUTTON_TEMPLATE.format(channel_number=channel_index + 1)
+            )
             button.setCheckable(True)
             button.setMinimumHeight(30)
             button.set_drag_menu(self)
@@ -223,9 +230,9 @@ class ChannelDragAndDropMenu(QWidget):
         has_channels = self.available_channel_count > 0
         self.message_label.setVisible(not has_channels)
         self.message_label.setText(
-            "Waiting for available EMG channels..."
+            button_labels.CHANNEL_SELECTOR_WAITING_MESSAGE
             if is_connected
-            else "Connect to TCP server to display available EMG channels"
+            else button_labels.CHANNEL_SELECTOR_CONNECT_MESSAGE
         )
         self.select_all_button.setVisible(has_channels)
         for channel_index, button in self.channel_buttons.items():

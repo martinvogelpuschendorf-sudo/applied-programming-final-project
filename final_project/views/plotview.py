@@ -20,6 +20,11 @@ from matplotlib.figure import Figure
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QWidget
 from vispy import scene
 
+try:
+    from . import button_labels
+except ImportError:
+    from views import button_labels
+
 
 EMPTY_LINE_POINTS = np.array([[0.0, 0.0], [0.0, 0.0]], dtype=np.float32)
 CHANNEL_COLORS = [
@@ -90,6 +95,7 @@ class VisPySignalPlot(QWidget):
     """
 
     def __init__(self, title: str, parent: QWidget | None = None) -> None:
+        """Create the VisPy scene used by MainView's live and all-channel plots."""
         super().__init__(parent)
         self.title = title
         self.sample_rate = 1000.0
@@ -100,7 +106,6 @@ class VisPySignalPlot(QWidget):
         self.current_signal_time = 0.0
         self.visible_channel_limit: int | None = 4
         self.minimum_plot_height = 380
-        self.channel_row_height = 120
         self.viewport_height = self.minimum_plot_height
         self._plotted_channel_count = 0
         self.left_margin_fraction = 0.18
@@ -701,34 +706,44 @@ class VisPySignalPlot(QWidget):
             label.visible = False
 
     def _update_minimum_height(self, channel_count: int) -> None:
+        """Resize the live canvas so the requested channel count fits the viewport."""
         if self.visible_channel_limit is None or channel_count <= self.visible_channel_limit:
             minimum_height = self.minimum_plot_height
         else:
-            viewport_row_height = math.ceil(self.viewport_height / self.visible_channel_limit) + 1
-            row_height = max(self.channel_row_height, viewport_row_height)
             minimum_height = max(
                 self.minimum_plot_height,
-                channel_count * row_height,
+                math.floor(channel_count * self.viewport_height / self.visible_channel_limit),
             )
         self.canvas.native.setMinimumHeight(minimum_height)
         self.setMinimumHeight(minimum_height)
 
 
 class AllChannelsDialog(QDialog):
-    """Dialog showing the live all-channel overview."""
+    """Dialog showing the live all-channel overview.
+
+    MainView owns the dialog and redraws its embedded VisPySignalPlot from the
+    latest cached live data whenever the user opens "Plot All Channels".
+    """
 
     def __init__(self, plot: VisPySignalPlot, parent: QWidget | None = None) -> None:
+        """Wrap an existing VisPySignalPlot in a top-level dialog window."""
         super().__init__(parent)
-        self.setWindowTitle("Plot All Channels")
+        self.setWindowTitle(button_labels.PLOT_ALL_CHANNELS_DIALOG_TITLE)
         self.resize(1100, 760)
         layout = QVBoxLayout(self)
         layout.addWidget(plot)
 
 
 class OfflineMatplotlibPlot(QWidget):
-    """Offline Matplotlib plot for recorded selected channels."""
+    """Offline Matplotlib plot for worker-prepared recorded channels.
+
+    MainView keeps this widget on the GUI thread. OfflineProcessingWorker
+    prepares the selected/sliced/downsampled arrays, and MainView passes that
+    payload into ``plot_prepared`` for final rendering.
+    """
 
     def __init__(self, parent: QWidget | None = None) -> None:
+        """Create the Matplotlib figure canvas used by the Offline tab."""
         super().__init__(parent)
         self.sample_rate = 1000.0
         self.selected_channel = 0
@@ -737,17 +752,16 @@ class OfflineMatplotlibPlot(QWidget):
         self.recording_duration_seconds = 0.0
         self.visible_channel_limit: int | None = 4
         self.minimum_plot_height = 380
-        self.channel_row_height = 120
         self.viewport_height = self.minimum_plot_height
         self._plotted_channel_count = 0
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.figure = Figure(figsize=(7, 4), tight_layout=True)
+        self.figure = Figure(figsize=(7, 4), tight_layout=False)
         self.canvas = FigureCanvas(self.figure)
         self.axes = self.figure.add_subplot(111)
         layout.addWidget(self.canvas)
-        self.show_empty("No recorded data yet.")
+        self.show_empty(button_labels.OFFLINE_NO_RECORDING_MESSAGE)
 
     def set_visible_channel_limit(self, limit: int | None) -> None:
         """Set how many subplots should fit before the offline plot scrolls."""
@@ -761,6 +775,7 @@ class OfflineMatplotlibPlot(QWidget):
     def set_visible_window_start_seconds(self, seconds: float) -> None:
         """Set the start of the offline inspection window."""
         self.visible_window_start_seconds = max(0.0, float(seconds))
+        self.update_visible_x_range()
 
     def set_visible_channel_viewport_height(self, height: int) -> None:
         """Use the scroll viewport height to keep the chosen number visible."""
@@ -768,6 +783,7 @@ class OfflineMatplotlibPlot(QWidget):
         self._update_minimum_height(self._plotted_channel_count)
 
     def set_channel(self, channel_index: int) -> None:
+        """Remember the last selected channel for legacy single-channel calls."""
         self.selected_channel = channel_index
 
     def plot(
@@ -778,7 +794,7 @@ class OfflineMatplotlibPlot(QWidget):
     ) -> None:
         data = np.asarray(data, dtype=np.float64)
         if data.size == 0 or data.ndim != 2 or data.shape[1] == 0:
-            self.show_empty("No recorded data available.")
+            self.show_empty(button_labels.OFFLINE_NO_RECORDED_DATA_AVAILABLE_MESSAGE)
             return
 
         if channel_indices is None:
@@ -791,7 +807,7 @@ class OfflineMatplotlibPlot(QWidget):
         ]
         self._plotted_channel_count = len(valid_indices)
         if not valid_indices:
-            self.show_empty("Select one or more channels to inspect recorded data.")
+            self.show_empty(button_labels.OFFLINE_SELECT_CHANNELS_MESSAGE)
             return
 
         self._update_minimum_height(len(valid_indices))
@@ -828,7 +844,84 @@ class OfflineMatplotlibPlot(QWidget):
         self.axes = axes[0]
         self.canvas.draw_idle()
 
+    def plot_prepared(
+        self,
+        data: np.ndarray,
+        x_values: np.ndarray,
+        mode: str,
+        channel_indices: list[int],
+        recording_duration_seconds: float,
+    ) -> None:
+        """Draw worker-prepared offline data without extra processing.
+
+        ``data`` is already filtered/sliced/downsampled by OfflineProcessingWorker.
+        This method only updates Qt/Matplotlib objects, so it must be called
+        from MainView on the GUI thread.
+        """
+        data = np.asarray(data, dtype=np.float64)
+        x_values = np.asarray(x_values, dtype=np.float64)
+        self.recording_duration_seconds = max(0.0, float(recording_duration_seconds))
+        self._plotted_channel_count = len(channel_indices)
+
+        if data.size == 0 or data.ndim != 2 or data.shape[1] == 0 or not channel_indices:
+            self.show_empty(button_labels.OFFLINE_SELECT_CHANNELS_MESSAGE)
+            return
+
+        self._update_minimum_height(len(channel_indices))
+        self._plot_stacked_prepared(data, x_values, mode, channel_indices)
+
+    def _plot_stacked_prepared(
+        self,
+        data: np.ndarray,
+        x_values: np.ndarray,
+        mode: str,
+        channel_indices: list[int],
+    ) -> None:
+        """Draw many offline channels on one axes to keep scrolling responsive."""
+        self.figure.clear()
+        self.figure.subplots_adjust(left=0.08, right=0.995, top=0.92, bottom=0.1)
+        axis = self.figure.add_subplot(111)
+        row_spacing = 3.0
+        offsets = np.arange(len(channel_indices) - 1, -1, -1, dtype=np.float64) * row_spacing
+
+        for row_index, channel_index in enumerate(channel_indices):
+            row = data[row_index]
+            centered = row - np.nanmedian(row)
+            scale = np.nanpercentile(np.abs(centered), 95)
+            if not np.isfinite(scale) or scale <= 0:
+                scale = 1.0
+            axis.plot(
+                x_values,
+                centered / scale + offsets[row_index],
+                color=channel_color_css(channel_index),
+                linewidth=0.8,
+            )
+
+        axis.set_title(f"Recorded Channels - {mode}")
+        axis.set_xlabel("Time (s)")
+        axis.set_ylabel("Channels")
+        axis.set_yticks(offsets)
+        axis.set_yticklabels([f"Ch {channel_index + 1}" for channel_index in channel_indices])
+        axis.set_ylim(offsets[-1] - 1.6, offsets[0] + 1.6)
+        axis.grid(True, axis="x", alpha=0.25)
+        self.axes = axis
+        self.update_visible_x_range(redraw=False)
+        self.canvas.draw_idle()
+
+    def update_visible_x_range(self, redraw: bool = True) -> None:
+        """Move the displayed offline time window without rebuilding the plot."""
+        if self.axes is None or not self.axes.has_data():
+            return
+        if self.visible_duration_seconds is None:
+            self.axes.set_xlim(0.0, max(1.0, self.recording_duration_seconds))
+        else:
+            start = self.visible_window_start_seconds
+            self.axes.set_xlim(start, start + self.visible_duration_seconds)
+        if redraw:
+            self.canvas.draw_idle()
+
     def show_empty(self, message: str) -> None:
+        """Display a centered empty-state message in the Offline tab plot."""
         self._plotted_channel_count = 0
         self._update_minimum_height(0)
         self.figure.clear()
@@ -838,14 +931,13 @@ class OfflineMatplotlibPlot(QWidget):
         self.canvas.draw_idle()
 
     def _update_minimum_height(self, channel_count: int) -> None:
+        """Resize the offline canvas so the selected visible-channel count fits."""
         if self.visible_channel_limit is None or channel_count <= self.visible_channel_limit:
             minimum_height = self.minimum_plot_height
         else:
-            viewport_row_height = math.ceil(self.viewport_height / self.visible_channel_limit) + 1
-            row_height = max(self.channel_row_height, viewport_row_height)
             minimum_height = max(
                 self.minimum_plot_height,
-                channel_count * row_height,
+                math.floor(channel_count * self.viewport_height / self.visible_channel_limit),
             )
         self.canvas.setMinimumHeight(minimum_height)
         self.setMinimumHeight(minimum_height)
