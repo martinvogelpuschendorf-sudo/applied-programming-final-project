@@ -50,22 +50,34 @@ python final_project/main.py
 
 ## Use
 
-Open the app and keep `Host` as `localhost` unless you want to connect to a
-server on another machine. Enter the server port and press `Start Server` to
-launch the local TCP server from inside the GUI. Then press `Connect`; live
-streaming starts automatically after a successful connection. Use `Disconnect`
-to stop the client connection and keep the received data for offline inspection.
-Use `Stop Server` when you no longer need the local TCP server.
+The intended project workflow is to connect this GUI to the provided exercise
+TCP server:
 
-The `Channel` control selects one of the 32 channels for the live VisPy plot.
+1. Start the provided exercise TCP server outside this GUI.
+2. Enter its host and port in the GUI.
+3. Press `Connect TCP Client` to start live streaming.
+4. Use `Disconnect TCP Client` to stop the client connection. The received data
+   remains available in the `Offline` tab for inspection.
+
+The GUI also includes a built-in local TCP demo server. The `Start Demo TCP
+Server` button launches this local server on the selected host and port. This is
+useful for development, debugging, or presenting the app without separately
+launching the provided exercise server, but it is not the required
+final-project server. The connect button does not start this demo server
+automatically; start it explicitly only when you want the local demo workflow.
+
 `Signal Mode` switches the live and offline views between `Original`, `RMS`, and
-`Filtered`. `Plot All Channels` opens a live overview dialog with all 32 channels
-drawn together using vertical offsets. The `Offline` tab shows the recorded
-selected channel with Matplotlib after streaming has stopped or whenever
-`Update Offline Plot` is pressed.
+`Filtered`. Use the channel buttons to select which channels are shown, and use
+`Visible Channels` to choose how many stacked channel rows fit before vertical
+scrolling appears. `Plot all Channels` opens a live overview dialog. The
+`Offline` tab shows the recorded selected channels and remains usable after TCP
+disconnect.
 
 Signal processing uses a 50-sample moving RMS window. Filtering uses a 4th-order
 Butterworth band-pass filter from 20 Hz to 450 Hz at a 1000 Hz assumed sample
 rate. If SciPy is not installed yet, the app falls back to a small NumPy-only
 baseline-removal filter so the GUI can still launch, but the intended setup is
 the full `requirements.txt` install.
+
+See `final_project/services/TCP_README.md` for more detail about the TCP client,
+the built-in local demo server, packet size, and packet reconstruction.

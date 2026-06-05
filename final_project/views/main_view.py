@@ -167,6 +167,7 @@ class MainView(QMainWindow):
         self.single_plot = VisPySignalPlot(button_labels.LIVE_PLOT_TITLE)
         self.all_channels_plot = VisPySignalPlot(button_labels.ALL_CHANNELS_PLOT_TITLE)
         self.offline_plot = OfflineMatplotlibPlot()
+        self._set_plot_sample_rate(self.view_model.sample_rate)
         self.all_channels_dialog = AllChannelsDialog(self.all_channels_plot, self)
         self.offline_request_timer = QTimer(self)
         self.offline_request_timer.setSingleShot(True)
@@ -366,10 +367,11 @@ class MainView(QMainWindow):
         self.view_model.connection_changed.connect(self._set_connected_state)
         self.view_model.server_running_changed.connect(self._set_server_running_state)
         self.view_model.live_data_changed.connect(self._update_live_plots)
+        self.view_model.stream_metadata_changed.connect(self._update_stream_metadata)
         self.view_model.offline_data_changed.connect(self._update_offline_plot)
 
     def _toggle_server_requested(self) -> None:
-        """Start or stop the local TCP server from one stateful button."""
+        """Start or stop the optional local demo TCP server."""
         if self._is_server_running:
             self.view_model.stop_tcp_server()
         else:
@@ -380,7 +382,7 @@ class MainView(QMainWindow):
         if self._is_client_connected:
             self.view_model.disconnect_from_server()
         else:
-            self._start_server_then_connect()
+            self.view_model.connect_to_server(self.host_input.text(), self.port_input.text())
 
     def _signal_mode_changed(self, mode: str) -> None:
         """Send mode changes to live processing and queue offline worker refresh."""
@@ -389,26 +391,9 @@ class MainView(QMainWindow):
             self._schedule_offline_refresh()
 
     def _channel_placeholder_clicked(self) -> None:
-        """Start the local server and connect when the empty channel panel is clicked."""
+        """Connect the TCP client when the empty channel panel is clicked."""
         if not self._is_client_connected:
-            self._start_server_then_connect()
-
-    def _start_server_then_connect(self) -> None:
-        """Ensure the local TCP server is running before connecting the client."""
-        if self._is_server_running:
             self.view_model.connect_to_server(self.host_input.text(), self.port_input.text())
-            return
-
-        self.view_model.start_tcp_server(self.host_input.text(), self.port_input.text())
-        QTimer.singleShot(
-            150,
-            lambda: self.view_model.connect_to_server(
-                self.host_input.text(),
-                self.port_input.text(),
-            )
-            if self._is_server_running and not self._is_client_connected
-            else None,
-        )
 
     def _channel_button_clicked(self, channel_index: int, checked: bool) -> None:
         """Toggle a live channel button and keep selected rows in click order."""
@@ -503,6 +488,22 @@ class MainView(QMainWindow):
             button.setChecked(channel_index in self.selected_channel_indices)
         self._refresh_channel_button_styles()
 
+    def _set_plot_sample_rate(self, sample_rate: float) -> None:
+        """Apply one stream sample rate to every plot widget."""
+        self.single_plot.sample_rate = sample_rate
+        self.all_channels_plot.sample_rate = sample_rate
+        self.offline_plot.sample_rate = sample_rate
+
+    def _update_stream_metadata(self, sample_rate: float, channel_count: int) -> None:
+        """Refresh GUI controls when ViewModel learns stream metadata."""
+        self._set_plot_sample_rate(float(sample_rate))
+        if channel_count > 0 and channel_count != self.available_channel_count:
+            self.available_channel_count = int(channel_count)
+            self.channel_order = list(range(self.available_channel_count))
+            self.channel_drag_menu.set_channel_order(self.channel_order)
+            self._sync_available_channel_controls()
+        self._update_connection_info()
+
     def _update_select_all_button(self) -> None:
         """Style and label the bulk selection control."""
         available_indices = set(range(self.available_channel_count))
@@ -525,8 +526,9 @@ class MainView(QMainWindow):
         )
 
     def _update_connection_info(self) -> None:
-        """Show the current TCP endpoint and measured stream metadata."""
-        if not self._is_client_connected:
+        """Show the TCP endpoint and preserved stream metadata."""
+        has_recording = self.view_model.recorded_sample_count > 0
+        if not self._is_client_connected and not has_recording:
             self.connection_info_label.setText(button_labels.CONNECTION_INFO_EMPTY)
             return
 
@@ -535,15 +537,25 @@ class MainView(QMainWindow):
         has_received_samples = (
             self.latest_all_channels.ndim == 2 and self.latest_all_channels.shape[1] > 0
         )
-        channel_text = str(self.latest_all_channels.shape[0]) if has_received_samples else "--"
+        channel_count = (
+            self.latest_all_channels.shape[0]
+            if has_received_samples
+            else self.available_channel_count or self.view_model.stream_channel_count
+        )
+        channel_text = str(channel_count) if channel_count else "--"
         sample_rate = getattr(self.view_model, "sample_rate", self.single_plot.sample_rate)
+        current_time = (
+            self.view_model.recorded_sample_count / sample_rate
+            if has_recording
+            else self.current_time
+        )
         self.connection_info_label.setText(
             button_labels.CONNECTION_INFO_TEMPLATE.format(
                 host=host,
                 port=port,
                 channel_count=channel_text,
                 sample_rate=sample_rate,
-                current_time=self.current_time,
+                current_time=current_time,
             )
         )
 
@@ -683,13 +695,10 @@ class MainView(QMainWindow):
         )
         if not is_connected:
             self.offline_request_timer.stop()
-            self.latest_all_channels = np.empty((32, 0), dtype=np.float64)
-            self.latest_single_channel = np.empty(0, dtype=np.float64)
-            self._schedule_live_redraw()
             has_recording = self.view_model.recorded_sample_count > 0
             if has_recording:
                 if self.available_channel_count == 0:
-                    self.available_channel_count = self.view_model.CHANNEL_COUNT
+                    self.available_channel_count = self.view_model.stream_channel_count
                 self.current_time = self.view_model.recorded_sample_count / self.view_model.sample_rate
                 # Keep channel buttons, selected channels, the offline scrollbar,
                 # and the current offline plot available after TCP disconnect.
@@ -697,6 +706,12 @@ class MainView(QMainWindow):
                 if self._offline_tab_is_visible():
                     self._schedule_offline_refresh()
             else:
+                self.latest_all_channels = np.empty(
+                    (self.view_model.stream_channel_count, 0),
+                    dtype=np.float64,
+                )
+                self.latest_single_channel = np.empty(0, dtype=np.float64)
+                self._schedule_live_redraw()
                 self.available_channel_count = 0
                 self.current_time = 0.0
                 self._clear_channel_selection()

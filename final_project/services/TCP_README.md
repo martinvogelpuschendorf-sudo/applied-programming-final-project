@@ -1,38 +1,109 @@
-## Model Component: EMGTCPClient Specification
+# TCP Communication Notes
 
-The `EMGTCPClient` class handles the core **TCP communication, packet reconstruction, and buffering** for the EMG pipeline. It provides a non-blocking network client that isolates low-level data streaming from the PySide6 GUI event loop.
+This application is designed to connect to the provided exercise TCP server as
+a TCP client. The GUI also includes a built-in local TCP demo server, but that
+server is only a convenience feature for local testing and demos.
 
-### Core Architecture & API List
+## Intended Project Workflow
 
-Here is the list of functions implemented in the class `EMGTCPClient` and how they work:
+Use this workflow when testing against the provided exercise server:
 
-#### 1. `def __init__(self, host='localhost', port=12345)`
-* **What it does:** Initializes the client configuration, internal streaming byte buffers, and separate caching pools for live and offline data tracking.
-* **Specification:** * Defines `self.TARGET_BYTES = 4608` ($32 \text{ channels} \times 18 \text{ samples} \times 8 \text{ bytes (float64)}$) as the strict alignment threshold for packet reconstruction.
-  * Implements a high-performance Python list (`self.all_packets`) for cumulative storage to prevent memory allocation bottlenecks caused by frequent NumPy concatenation.
+1. Start the provided exercise TCP server outside this GUI.
+2. Enter the server host and port in the GUI.
+3. Click `Connect TCP Client`.
+4. The app receives 32-channel EMG packets and displays them live.
+5. After disconnecting, the recorded data remains available in the Offline tab.
 
-#### 2. `def connect(self)`
-* **What it does:** Establishes a TCP connection to the server and immediately flips the socket into **Non-blocking Mode** (`self.client_socket.setblocking(False)`).
-* **Note:** This ensures that when the network interface is queried for data, it returns instantly instead of hanging, effectively preventing the GUI thread from freezing.
+The connect action only connects the TCP client. It does not automatically start
+the built-in local demo server.
 
-#### 3. `def receive_data(self)`
-* **What it does:** Acts as the automated streaming core. This must be continuously driven inside a background thread or a `QTimer` loop. It drains all raw binary data currently pooled inside the network socket buffer.
-* **Robustness:** * If the server finishes playing the data file and closes the connection, this function detects the empty frame, cleanly shuts down the socket via `disconnect()`, and halts further operations.
-  * It automatically handles streaming clumping and fragmentation by appending newly sliced raw bytes into an internal `byte_buffer`. Once enough bytes are accumulated, it reconstructs them into standard `(32, 18)` NumPy matrices.
+## Built-In Local Demo Server
 
-#### 4. `def get_latest_live_data(self)`
-* **What it does (For VisPy Live Plotting):** This is the high-performance retrieval interface for real-time visualization. It fetches all newly accumulated packets since the last query and advances an internal index pointer to clear the live view state.
-* **Return Value:** A concatenated NumPy array with a shape of `(32, N)`, where `32` represents the fixed EMG channels and `N` represents the total number of samples collected during this specific timer chunk.
+The app also contains `EMGTCPServer` in `TCP_server_service.py`. This server is
+started only when the user clicks `Start Demo TCP Server`.
 
-#### 5. `def get_all_offline_data(self)`
-* **What it does (For Offline Matplotlib & Processing):** This is the historical data retrieval interface. It allows offline inspection after streaming completes by returning the complete recording from the moment of connection to disconnection.
-* **Note:** Unlike the live data interface, this function **does not delete** or clear the internal storage, preserving the intact data matrix for filtering and RMS calculation.
-* **Return Value:** A complete NumPy array with a shape of `(32, Total Samples)`.
+This built-in server is not required by the final project specification. It is
+included so the app can be demonstrated or debugged without launching the
+provided exercise server separately.
 
-#### 6. `def disconnect(self)`
-* **What it does:** Safely tears down active network connections, closes the socket stream, and resets internal boolean flags.
+If you enter a different free port, such as `12346`, and explicitly start the
+built-in demo server there, the GUI client can connect successfully because both
+the local server and client are using the same selected port.
 
----
+For grading or requirement-focused testing, use the provided exercise server as
+the server source and treat the built-in server as a local fallback.
 
-* **For Real-time Plotting Pipeline:** Connect ViewModel slot to the `data_ready` signal emitted by this client. Within your `QTimer` or thread polling cycle, call `get_latest_live_data()` to grab the latest signal segment without losing past records.
-* **For Signal Analysis Pipeline :** After calling `disconnect()` or upon receiving the "Server finished playback" status notification, call `get_all_offline_data()` to export the raw, unaltered history dataset straight into your filter algorithms and Matplotlib figure widgets.
+## Current GUI Behavior
+
+- `Start Demo TCP Server` starts or stops the built-in local demo server on the
+  selected host and port.
+- `Connect TCP Client` connects only the client to the selected host and port.
+- The connect action no longer starts the demo server automatically.
+- A changed port works only if an external server or the explicitly started
+  local demo server is listening on that port.
+
+## EMGTCPClient
+
+`EMGTCPClient` handles the client-side TCP connection and packet reconstruction.
+It is currently owned by `TCPAcquisitionWorker` in the ViewModel layer so socket
+polling runs outside the GUI thread.
+
+### `__init__(host='localhost', port=12345)`
+
+Initializes the client endpoint, byte buffers, decoded sample buffer, and packet
+size configuration.
+
+The expected packet size is:
+
+```text
+32 channels x 18 samples x 8 bytes = 4608 bytes
+```
+
+### `connect()`
+
+Opens the TCP socket and switches it to non-blocking mode. Non-blocking mode is
+important because socket reads should never freeze the GUI.
+
+### `receive_data()`
+
+Drains all currently available bytes from the socket and appends them to the
+internal byte buffer. It handles packet fragmentation and clumped packets by
+extracting only complete 4608-byte frames.
+
+If the server closes the connection, this method disconnects the client cleanly.
+
+### `get_latest_live_data()`
+
+Returns the decoded data accumulated since the previous call and clears the
+live read pointer.
+
+The returned array has shape:
+
+```text
+(32, N)
+```
+
+where `32` is the number of EMG channels and `N` is the number of samples
+received during that polling interval.
+
+### `get_all_offline_data()`
+
+Returns the full historical packet buffer as one `(32, Total Samples)` array.
+The current ViewModel stores its own immutable recording chunks for offline
+processing, but this client method is still available on the service.
+
+### `disconnect()`
+
+Closes the active socket and resets the client connection state.
+
+## EMGTCPServer
+
+`EMGTCPServer` is the built-in local demo server. It streams 32-channel EMG
+packets to any connected local client.
+
+It first tries to load the provided `recording.pkl`. If that file is not
+available, it generates a synthetic EMG-like signal so the GUI can still be
+tested.
+
+Again, this server is for local testing/demo. The main project requirement is
+that the app can connect as a client to the provided exercise TCP server.

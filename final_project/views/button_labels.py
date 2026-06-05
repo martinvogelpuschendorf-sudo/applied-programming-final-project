@@ -1,10 +1,10 @@
 """Editable labels and button text used by the GUI views."""
 
-START_TCP_SERVER = "Start\nTCP Server"
-STOP_TCP_SERVER = "Stop\nTCP Server"
+START_TCP_SERVER = "Start Demo\nTCP Server"
+STOP_TCP_SERVER = "Stop Demo\nTCP Server"
 
-CONNECT_TO_TCP_SERVER = "Connect\nTCP Server"
-DISCONNECT_FROM_TCP_SERVER = "Disconnect\nTCP Server"
+CONNECT_TO_TCP_SERVER = "Connect TCP\nClient"
+DISCONNECT_FROM_TCP_SERVER = "Disconnect TCP\nClient"
 
 PLOT_ALL_CHANNELS = "Plot all Channels"
 PLOT_ALL_CHANNELS_DIALOG_TITLE = PLOT_ALL_CHANNELS
