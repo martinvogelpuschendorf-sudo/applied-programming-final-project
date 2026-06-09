@@ -105,5 +105,16 @@ It first tries to load the provided `recording.pkl`. If that file is not
 available, it generates a synthetic EMG-like signal so the GUI can still be
 tested.
 
-Again, this server is for local testing/demo. The main project requirement is
+Again, this server is for local testing/demo. The main project requirement is 
 that the app can connect as a client to the provided exercise TCP server.
+
+## Data Buffering Design (Runtime Flow)
+To keep the application simple and lightweight, data buffering is handled 
+directly within the runtime path by the ViewModel layer, avoiding redundant manager classes:
+
+1. Live Rolling Buffer: 
+Handled via `MainViewModel.live_raw_data[:, -live_window_samples:]` to slice out the newest 
+samples required for real-time VisPy visualization.
+
+2. Full Offline Recording: Handled via `MainViewModel._recording_chunks` to store the entire 
+history of received EMG blocks for full offline analysis.
