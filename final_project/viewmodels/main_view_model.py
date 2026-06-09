@@ -33,12 +33,14 @@ class TCPAcquisitionWorker(QObject):
     status_updated = Signal(str)
     connection_changed = Signal(bool)
     data_received = Signal(object)
+    metadata_changed = Signal(float, int)
 
     def __init__(self) -> None:
         """Create an idle worker; the socket is opened later by ``start``."""
         super().__init__()
         self._client: EMGTCPClient | None = None
         self._timer: QTimer | None = None
+        self._last_channel_count = 0
 
     @Slot(str, int)
     def start(self, host: str, port: int) -> None:
@@ -47,6 +49,7 @@ class TCPAcquisitionWorker(QObject):
         self._client = EMGTCPClient(host, port)
         self._client.status_updated.connect(self.status_updated)
         self._client.connect()
+        self._last_channel_count = 0
 
         if not self._client.is_connected:
             self.connection_changed.emit(False)
@@ -76,18 +79,28 @@ class TCPAcquisitionWorker(QObject):
             return
 
         self._client.receive_data()
+
+        if hasattr(self._client, "get_latest_live_data"):
+            new_data = self._client.get_latest_live_data()
+        else:
+            new_data = self._client.get_latest_data()
+        if new_data.shape[1] > 0:
+            chunk = np.ascontiguousarray(new_data, dtype=np.float64)
+            chunk.setflags(write=False)
+            self._emit_stream_metadata(chunk)
+            self.data_received.emit(chunk)
+
         if not self._client.is_connected:
             if self._timer is not None:
                 self._timer.stop()
             self.connection_changed.emit(False)
 
-        new_data = self._client.get_latest_data()
-        if new_data.shape[1] == 0:
-            return
-
-        chunk = np.ascontiguousarray(new_data, dtype=np.float64)
-        chunk.setflags(write=False)
-        self.data_received.emit(chunk)
+    def _emit_stream_metadata(self, chunk: np.ndarray) -> None:
+        """Publish packet-shape metadata inferred from the raw TCP stream."""
+        channel_count = int(chunk.shape[0])
+        if channel_count != self._last_channel_count:
+            self._last_channel_count = channel_count
+            self.metadata_changed.emit(float(MainViewModel.EXERCISE_SAMPLE_RATE), channel_count)
 
 
 class OfflineProcessingWorker(QObject):
@@ -225,6 +238,7 @@ class MainViewModel(QObject):
     #   2. the currently selected processed channel for the main live plot
     #   3. current stream time in seconds for the x-axis labels
     live_data_changed = Signal(object, object, float)
+    stream_metadata_changed = Signal(float, int)
 
     # Worker-prepared offline plot payload. The request id lets MainView ignore
     # late results after the user changes mode, channels, or time window.
@@ -239,12 +253,15 @@ class MainViewModel(QObject):
     _offline_processing_requested = Signal(int, object, str, float, object, object, float, int)
 
     CHANNEL_COUNT = 32
+    EXERCISE_SAMPLE_RATE = 2000.0
 
     def __init__(self) -> None:
         """Create app state, services, and worker threads used by the View."""
         super().__init__()
         self.status_text = "Disconnected."
-        self.sample_rate = 1000.0
+        # The provided exercise TCP server streams raw packets only. It does
+        # not send metadata, so the app uses the exercise recording rate here.
+        self.sample_rate = self.EXERCISE_SAMPLE_RATE
         # Keep enough live data for the selected rolling display window. If
         # this buffer is shorter than the visible duration, the plot
         # necessarily leaves part of the canvas empty until enough samples have
@@ -254,7 +271,8 @@ class MainViewModel(QObject):
         self.signal_mode = "Filtered"
         self._recording_chunks: list[np.ndarray] = []
         self.recorded_sample_count = 0
-        self.live_raw_data = np.empty((self.CHANNEL_COUNT, 0), dtype=np.float64)
+        self.stream_channel_count = self.CHANNEL_COUNT
+        self.live_raw_data = np.empty((self.stream_channel_count, 0), dtype=np.float64)
         self._latest_offline_request_id = 0
         self._offline_job_in_flight = False
         self._pending_offline_request: tuple[object, ...] | None = None
@@ -277,6 +295,7 @@ class MainViewModel(QObject):
         self._tcp_worker.status_updated.connect(self._set_status)
         self._tcp_worker.connection_changed.connect(self._handle_tcp_connection_changed)
         self._tcp_worker.data_received.connect(self._handle_tcp_data)
+        self._tcp_worker.metadata_changed.connect(self._handle_stream_metadata)
         self._tcp_connect_requested.connect(self._tcp_worker.start)
         self._tcp_disconnect_requested.connect(self._tcp_worker.stop)
         self._tcp_thread.start()
@@ -303,10 +322,24 @@ class MainViewModel(QObject):
         self._recording_chunks.clear()
         self.recorded_sample_count = 0
         self.live_raw_data = np.empty((self.CHANNEL_COUNT, 0), dtype=np.float64)
+        self.stream_channel_count = self.CHANNEL_COUNT
         self.tcp_host = host.strip() or "localhost"
         self.tcp_port = port
         self._tcp_connect_requested.emit(self.tcp_host, self.tcp_port)
         self._emit_current_live_data()
+
+    @Slot(float, int)
+    def _handle_stream_metadata(self, sample_rate: float, channel_count: int) -> None:
+        """Update display/plot metadata inferred from packet shape.
+
+        The course server sends only float64 sample packets, not sampling-rate
+        metadata. ``sample_rate`` therefore carries the protocol default.
+        """
+        if np.isfinite(sample_rate) and sample_rate > 0:
+            self.sample_rate = float(sample_rate)
+        self.stream_channel_count = max(0, int(channel_count))
+        self.live_window_samples = max(2, int(10 * self.sample_rate))
+        self.stream_metadata_changed.emit(self.sample_rate, self.stream_channel_count)
 
     def start_tcp_server(self, host: str, port_text: str) -> None:
         """Start the local TCP server from the GUI."""
@@ -410,6 +443,12 @@ class MainViewModel(QObject):
         if chunk.ndim != 2 or chunk.shape[1] == 0:
             return
 
+        if chunk.shape[0] != self.stream_channel_count:
+            self.stream_channel_count = chunk.shape[0]
+            self.stream_metadata_changed.emit(self.sample_rate, self.stream_channel_count)
+        if self.live_raw_data.shape[0] != chunk.shape[0]:
+            self.live_raw_data = np.empty((chunk.shape[0], 0), dtype=np.float64)
+
         self._recording_chunks.append(chunk)
         self.recorded_sample_count += chunk.shape[1]
         self.live_raw_data = np.concatenate((self.live_raw_data, chunk), axis=1)[
@@ -426,7 +465,7 @@ class MainViewModel(QObject):
     def _recent_recording_window(self, sample_count: int) -> np.ndarray:
         """Return the newest raw samples without concatenating the full recording."""
         if not self._recording_chunks:
-            return np.empty((self.CHANNEL_COUNT, 0), dtype=np.float64)
+            return np.empty((self.stream_channel_count, 0), dtype=np.float64)
 
         selected_chunks: list[np.ndarray] = []
         remaining = sample_count
@@ -442,7 +481,7 @@ class MainViewModel(QObject):
     def _emit_current_live_data(self) -> None:
         """Process current buffers and emit the data needed by live views."""
         if self.live_raw_data.shape[1] == 0:
-            empty = np.empty((self.CHANNEL_COUNT, 0), dtype=np.float64)
+            empty = np.empty((self.stream_channel_count, 0), dtype=np.float64)
             self.live_data_changed.emit(empty, empty, 0.0)
             return
 
@@ -451,7 +490,8 @@ class MainViewModel(QObject):
         live_data = self.live_raw_data[:, -self.live_window_samples :]
         processed = process_signal(live_data, self.signal_mode, self.sample_rate)
         current_time = self.recorded_sample_count / self.sample_rate
-        self.live_data_changed.emit(processed, processed[self.selected_channel], current_time)
+        selected_channel = min(self.selected_channel, processed.shape[0] - 1)
+        self.live_data_changed.emit(processed, processed[selected_channel], current_time)
 
     @Slot(int, object)
     def _handle_offline_result(self, request_id: int, payload: object) -> None:
