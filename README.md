@@ -74,8 +74,8 @@ scrolling appears. `Plot all Channels` opens a live overview dialog. The
 disconnect.
 
 Signal processing uses a 50-sample moving RMS window. Filtering uses a 4th-order
-Butterworth band-pass filter from 20 Hz to 450 Hz at a 1000 Hz assumed sample
-rate. If SciPy is not installed yet, the app falls back to a small NumPy-only
+Butterworth band-pass filter from 20 Hz to 450 Hz at the Exercise 5 sample rate
+of 2000 Hz. If SciPy is not installed yet, the app falls back to a small NumPy-only
 baseline-removal filter so the GUI can still launch, but the intended setup is
 the full `requirements.txt` install.
 
