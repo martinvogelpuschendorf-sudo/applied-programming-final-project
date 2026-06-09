@@ -8,6 +8,7 @@ class EMGTCPClient(QObject):
     # Used to notify the ViewModel of current connection status or error messages
     data_ready = Signal()
     # Used to notify the ViewModel that new packets have been reconstructed and are ready for plotting
+    no_data_warning = Signal(str)
 
     def __init__(self, host='localhost', port=12345):
         super().__init__()
@@ -30,21 +31,25 @@ class EMGTCPClient(QObject):
 
         if self.is_connected:
             return True
-
         try:
             self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.client_socket.connect((self.host, self.port))
-
-            # Set the socket to non-blocking mode
             self.client_socket.setblocking(False)
 
             self.is_connected = True
             self.status_updated.emit("Connected successfully to server.")
+            return True
 
         except Exception as e:
             self.is_connected = False
-            self.status_updated.emit(
-                f"Connection failed: {e}")
+            if self.client_socket is not None:
+                try:
+                    self.client_socket.close()
+                except Exception:
+                    pass
+                self.client_socket = None
+
+            self.status_updated.emit(f"Connection failed: {e}")
             return False
 
     def disconnect(self):
@@ -72,6 +77,7 @@ class EMGTCPClient(QObject):
                 if not new_bytes:
                     self.status_updated.emit(
                         "Server finished playback. Disconnecting...")
+                    self._extract_packets()
                     self.disconnect()
                     return
 
@@ -82,6 +88,7 @@ class EMGTCPClient(QObject):
             except Exception as e:
                 self.status_updated.emit(
                     f"Read error: {e}")
+                self._extract_packets()
                 self.disconnect()
                 return
 
@@ -110,11 +117,12 @@ class EMGTCPClient(QObject):
         For VisPy rolling time window
         Returns all new data segments accumulated since the last read and advances the read pointer.
         """
-        if self.live_pointer >= len(self.all_packets):
+        current_len = len(self.all_packets)
+        if self.live_pointer >= current_len:
             return np.empty((32, 0), dtype=np.float64)
 
-        new_segments = self.all_packets[self.live_pointer:]
-        self.live_pointer = len(self.all_packets)
+        new_segments = self.all_packets[self.live_pointer:current_len]
+        self.live_pointer = current_len
         return np.concatenate(new_segments, axis=1)
 
     def get_all_offline_data(self):
@@ -123,7 +131,8 @@ class EMGTCPClient(QObject):
         Returns the complete, non-fragmented raw historical data from connection start to stop.
         """
         if not self.all_packets:  # Error handling: Raise an exception if no data was recorded before stopping
-            raise ValueError("No data available for offline plotting.")
+            self.no_data_warning.emit("No data recorded. Plot cannot be generated.")
+            return np.empty((32, 0), dtype=np.float64)
 
         return np.concatenate(self.all_packets, axis=1)
 
