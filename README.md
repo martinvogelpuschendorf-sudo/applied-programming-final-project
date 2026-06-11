@@ -73,11 +73,11 @@ scrolling appears. `Plot all Channels` opens a live overview dialog. The
 `Offline` tab shows the recorded selected channels and remains usable after TCP
 disconnect.
 
-Signal processing uses a 50-sample moving RMS window. Filtering uses a 4th-order
-Butterworth band-pass filter from 20 Hz to 450 Hz at the Exercise 5 sample rate
-of 2000 Hz. If SciPy is not installed yet, the app falls back to a small NumPy-only
-baseline-removal filter so the GUI can still launch, but the intended setup is
-the full `requirements.txt` install.
+Signal processing uses a 100 ms moving RMS window, corresponding to 200 samples
+at the Exercise 5 sample rate of 2000 Hz. Filtering uses a 4th-order Butterworth
+band-pass filter from 20 Hz to 450 Hz. If SciPy is not installed yet, the app
+falls back to a small NumPy-only baseline-removal filter so the GUI can still
+launch, but the intended setup is the full `requirements.txt` install.
 
 See `final_project/services/TCP_README.md` for more detail about the TCP client,
 the built-in local demo server, packet size, and packet reconstruction.

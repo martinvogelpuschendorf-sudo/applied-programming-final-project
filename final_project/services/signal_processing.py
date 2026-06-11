@@ -11,17 +11,26 @@ except ModuleNotFoundError:
     filtfilt = None
 
 
-def rms_signal(data: np.ndarray, window_size: int = 50) -> np.ndarray:
-    """Return moving RMS values for each channel in a 2D channel x sample array."""
+def rms_signal(
+    data: np.ndarray,
+    sample_rate: float = 1000.0,
+    window_ms: float = 100.0,
+) -> np.ndarray:
+    """Return a moving RMS envelope for each channel using a time-based window."""
     if data.size == 0:
         return data.copy()
 
-    window_size = max(1, int(window_size))
-    kernel = np.ones(window_size, dtype=np.float64) / window_size
-    squared = np.square(data)
-    return np.sqrt(
-        np.apply_along_axis(lambda row: np.convolve(row, kernel, mode="same"), 1, squared)
+    window_size = max(1, int(round(sample_rate * window_ms / 1000.0)))
+    window_size = min(window_size, data.shape[1])
+    window = np.ones(window_size, dtype=np.float64)
+    sample_counts = np.convolve(
+        np.ones(data.shape[1], dtype=np.float64), window, mode="same"
     )
+    squared = np.square(data, dtype=np.float64)
+    summed_squares = np.apply_along_axis(
+        lambda row: np.convolve(row, window, mode="same"), 1, squared
+    )
+    return np.sqrt(summed_squares / sample_counts)
 
 
 def bandpass_filter(
@@ -66,7 +75,7 @@ def process_signal(data: np.ndarray, mode: str, sample_rate: float = 1000.0) -> 
     """Apply the selected display mode to channel x sample data."""
     normalized_mode = mode.lower()
     if normalized_mode == "rms":
-        return rms_signal(data)
+        return rms_signal(data, sample_rate=sample_rate)
     if normalized_mode == "filtered":
         return bandpass_filter(data, sample_rate=sample_rate)
     return data.copy()
