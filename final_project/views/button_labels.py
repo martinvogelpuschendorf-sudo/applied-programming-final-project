@@ -2,6 +2,7 @@
 
 START_TCP_SERVER = "Start Demo\nTCP Server"
 STOP_TCP_SERVER = "Stop Demo\nTCP Server"
+TCP_SERVER_NO_DATA_WARNING = "TCP Server Connected\nServer not sending data"
 
 CONNECT_TO_TCP_SERVER = "Connect TCP\nClient"
 DISCONNECT_FROM_TCP_SERVER = "Disconnect TCP\nClient"
