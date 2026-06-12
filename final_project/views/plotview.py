@@ -134,7 +134,7 @@ class VisPySignalPlot(QWidget):
         layout.addWidget(self.canvas.native)
 
         self.view = self.canvas.central_widget.add_view()
-        self.view.camera = "panzoom"
+        self.view.camera = scene.PanZoomCamera(interactive=False)
 
         # Manual plot primitives. They are kept as persistent objects and only
         # their data is updated on each frame, which is much faster than

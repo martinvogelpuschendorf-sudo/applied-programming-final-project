@@ -81,6 +81,8 @@ class PlotScrollArea(QScrollArea):
             if self.verticalScrollBar().maximum() > 0:
                 self._scroll_from_wheel_event(event)
                 return True
+            event.accept()
+            return True
         return super().eventFilter(watched, event)
 
     def resizeEvent(self, event) -> None:
