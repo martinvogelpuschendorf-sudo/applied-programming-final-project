@@ -247,6 +247,7 @@ class MainViewModel(QObject):
     # Button-state signals for client and local server controls.
     connection_changed = Signal(bool)
     server_running_changed = Signal(bool)
+    server_recording_available_changed = Signal(bool)
 
     _tcp_connect_requested = Signal(str, int)
     _tcp_disconnect_requested = Signal()
@@ -285,6 +286,9 @@ class MainViewModel(QObject):
         self.tcp_server = EMGTCPServer()
         self.tcp_server.status_updated.connect(self._set_status)
         self.tcp_server.running_changed.connect(self.server_running_changed)
+        self.tcp_server.recording_available_changed.connect(
+            self.server_recording_available_changed
+        )
 
         # TCP reading owns a socket and timer, so it lives off the GUI thread.
         # Its signals cross back to this ViewModel using Qt queued delivery.

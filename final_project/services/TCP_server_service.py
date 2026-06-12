@@ -16,13 +16,14 @@ class EMGTCPServer(QObject):
     """Small TCP server that streams 32 x 18 float64 EMG packets.
 
     This service mirrors the exercise server but is controlled from the GUI.
-    It first tries to load the provided `recording.pkl`. If that file is not
-    available, it falls back to a synthetic test signal so the rest of the app
-    can still be demonstrated.
+    It loads the provided `data/recording.pkl` from the project folder. If that
+    file is missing, the server can still listen for clients but will not stream
+    data.
     """
 
     status_updated = Signal(str)
     running_changed = Signal(bool)
+    recording_available_changed = Signal(bool)
 
     CHANNELS = 32
     SAMPLES_PER_PACKET = 18
@@ -35,6 +36,7 @@ class EMGTCPServer(QObject):
         self.server_socket: socket.socket | None = None
         self.clients: list[socket.socket] = []
         self.running = False
+        self.has_recording_data = False
         self._accept_thread: threading.Thread | None = None
         self._windows = self._load_default_windows()
 
@@ -68,8 +70,15 @@ class EMGTCPServer(QObject):
         # The thread is daemonized so it cannot keep Python alive after exit.
         self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
         self._accept_thread.start()
-        self.status_updated.emit(f"TCP server started on {self.host}:{self.port}.")
+        if self.has_recording_data:
+            self.status_updated.emit(f"TCP server started on {self.host}:{self.port}.")
+        else:
+            self.status_updated.emit(
+                "TCP server started, but data/recording.pkl was not found. "
+                "Server is not sending data."
+            )
         self.running_changed.emit(True)
+        self.recording_available_changed.emit(self.has_recording_data)
         return True
 
     def stop(self) -> None:
@@ -98,6 +107,7 @@ class EMGTCPServer(QObject):
 
         self.status_updated.emit("TCP server stopped.")
         self.running_changed.emit(False)
+        self.recording_available_changed.emit(self.has_recording_data)
 
     def _accept_loop(self) -> None:
         """Accept clients and start one streaming thread per client."""
@@ -123,6 +133,19 @@ class EMGTCPServer(QObject):
 
     def _stream_to_client(self, client_socket: socket.socket) -> None:
         """Send packet windows repeatedly until the client or server stops."""
+        if not self._windows:
+            try:
+                while self.running:
+                    time.sleep(0.2)
+            finally:
+                if client_socket in self.clients:
+                    self.clients.remove(client_socket)
+                try:
+                    client_socket.close()
+                except OSError:
+                    pass
+            return
+
         sleep_time = self.SAMPLES_PER_PACKET / self.sampling_rate
         try:
             while self.running:
@@ -146,7 +169,7 @@ class EMGTCPServer(QObject):
                 pass
 
     def _load_default_windows(self) -> list[np.ndarray]:
-        """Load real exercise data or generate a synthetic fallback signal."""
+        """Load real exercise data from the project-local recording file."""
         recording_path = self._default_recording_path()
         if recording_path is not None:
             try:
@@ -157,13 +180,15 @@ class EMGTCPServer(QObject):
                     recording.get("device_information", {}).get("sampling_frequency", 1000.0)
                 )
                 windows = self._windows_from_signal(signal)
+                self.has_recording_data = bool(windows)
                 self.status_updated.emit(f"Loaded TCP recording from {recording_path}.")
                 return windows
             except Exception as error:
                 self.status_updated.emit(f"Could not load recording.pkl: {error}")
 
-        self.status_updated.emit("Using synthetic TCP test signal.")
-        return self._synthetic_windows()
+        self.has_recording_data = False
+        self.status_updated.emit("Missing data/recording.pkl. TCP server will not send data.")
+        return []
 
     def _windows_from_signal(self, signal: np.ndarray) -> list[np.ndarray]:
         """Convert a recording array into 32 x 18 packet windows."""
@@ -182,7 +207,7 @@ class EMGTCPServer(QObject):
                 for start in range(0, sample_count, self.SAMPLES_PER_PACKET)
             ]
 
-        return self._synthetic_windows()
+        return []
 
     def _synthetic_windows(self) -> list[np.ndarray]:
         """Generate deterministic test EMG-like waves for local demos."""
@@ -198,13 +223,13 @@ class EMGTCPServer(QObject):
         return self._windows_from_signal(data)
 
     def _default_recording_path(self) -> Path | None:
-        """Search common project locations for the provided recording.pkl."""
+        """Return the repo-local recording path, with legacy fallbacks."""
         current = Path(__file__).resolve()
-        candidates = [
-            current.parents[4] / "Applied-Programming-2026" / "recording.pkl",
-            current.parents[3] / "Applied-Programming-2026" / "recording.pkl",
-            current.parents[2] / "recording.pkl",
-        ]
+        package_root = current.parents[1]
+        candidates = [package_root / "data" / "recording.pkl"]
+        for parent in current.parents:
+            candidates.append(parent / "recording.pkl")
+            candidates.append(parent / "Applied-Programming-2026" / "recording.pkl")
         for candidate in candidates:
             if candidate.exists():
                 return candidate

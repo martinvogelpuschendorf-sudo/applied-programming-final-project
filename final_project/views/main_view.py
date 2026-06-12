@@ -152,6 +152,7 @@ class MainView(QMainWindow):
         self.available_channel_count = 0
         self._is_client_connected = False
         self._is_server_running = False
+        self._server_has_recording_data = True
         self._offline_uses_total_time_window = True
         self._offline_scroll_syncing = False
         self._latest_offline_request_id = 0
@@ -220,7 +221,7 @@ class MainView(QMainWindow):
         self.host_input.setFixedWidth(130)
         self.port_input.setFixedWidth(130)
         self.start_server_button = QPushButton(button_labels.START_TCP_SERVER)
-        self.start_server_button.setFixedSize(130, 86)
+        self.start_server_button.setFixedSize(190, 86)
         self.connect_button = QPushButton(button_labels.CONNECT_TO_TCP_SERVER)
         self.connect_button.setFixedSize(130, 86)
         self.connection_info_label = QLabel()
@@ -366,6 +367,9 @@ class MainView(QMainWindow):
         self.view_model.status_changed.connect(self.status_label.setText)
         self.view_model.connection_changed.connect(self._set_connected_state)
         self.view_model.server_running_changed.connect(self._set_server_running_state)
+        self.view_model.server_recording_available_changed.connect(
+            self._set_server_recording_available_state
+        )
         self.view_model.live_data_changed.connect(self._update_live_plots)
         self.view_model.stream_metadata_changed.connect(self._update_stream_metadata)
         self.view_model.offline_data_changed.connect(self._update_offline_plot)
@@ -726,10 +730,36 @@ class MainView(QMainWindow):
     def _set_server_running_state(self, is_running: bool) -> None:
         """Enable/disable server buttons based on local server state."""
         self._is_server_running = is_running
-        self.start_server_button.setText(
-            button_labels.STOP_TCP_SERVER if is_running else button_labels.START_TCP_SERVER
-        )
+        self._refresh_server_button()
         self._refresh_host_port_state()
+
+    def _set_server_recording_available_state(self, has_recording_data: bool) -> None:
+        """Show a warning when the local TCP server has no recording to stream."""
+        self._server_has_recording_data = has_recording_data
+        self._refresh_server_button()
+
+    def _refresh_server_button(self) -> None:
+        if self._is_server_running and not self._server_has_recording_data:
+            self.start_server_button.setText(button_labels.TCP_SERVER_NO_DATA_WARNING)
+            self.start_server_button.setStyleSheet(
+                "QPushButton {"
+                " background: #b3261e;"
+                " color: #ffffff;"
+                " border: 1px solid #8c1d18;"
+                " border-radius: 4px;"
+                " font-weight: 700;"
+                " padding: 4px;"
+                "}"
+                "QPushButton:hover { background: #9f211a; }"
+            )
+            self.start_server_button.setToolTip(button_labels.TCP_SERVER_NO_DATA_WARNING)
+            return
+
+        self.start_server_button.setText(
+            button_labels.STOP_TCP_SERVER if self._is_server_running else button_labels.START_TCP_SERVER
+        )
+        self.start_server_button.setStyleSheet("")
+        self.start_server_button.setToolTip("")
 
     def _refresh_host_port_state(self) -> None:
         """Prevent endpoint edits while either side is using the endpoint."""
