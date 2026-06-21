@@ -101,20 +101,31 @@ Closes the active socket and resets the client connection state.
 `EMGTCPServer` is the built-in local demo server. It streams 32-channel EMG
 packets to any connected local client.
 
-It first tries to load the provided `recording.pkl`. If that file is not
-available, it generates a synthetic EMG-like signal so the GUI can still be
-tested.
+It first tries to load the project-local demo recording:
 
-Again, this server is for local testing/demo. The main project requirement is 
+```text
+final_project/data/recording.pkl
+```
+
+If that file is not available, the server can still start and listen for
+clients, but it does not send signal packets. In that case the GUI shows a
+warning that the server is not sending data.
+
+Again, this server is for local testing/demo. The main project requirement is
 that the app can connect as a client to the provided exercise TCP server.
 
 ## Data Buffering Design (Runtime Flow)
-To keep the application simple and lightweight, data buffering is handled 
-directly within the runtime path by the ViewModel layer, avoiding redundant manager classes:
+To keep the application simple and lightweight, buffering is split between the
+TCP service and the ViewModel runtime path:
 
-1. Live Rolling Buffer: 
-Handled via `MainViewModel.live_raw_data[:, -live_window_samples:]` to slice out the newest 
-samples required for real-time VisPy visualization.
+1. Packet byte buffering and packet reconstruction:
+Handled by `EMGTCPClient.byte_buffer` and `_extract_packets()`. The TCP client
+keeps incomplete socket reads until a full 4608-byte packet is available.
 
-2. Full Offline Recording: Handled via `MainViewModel._recording_chunks` to store the entire 
-history of received EMG blocks for full offline analysis.
+2. Live rolling display buffer:
+Handled via `MainViewModel.live_raw_data[:, -live_window_samples:]` to keep only
+the newest samples required for real-time VisPy visualization.
+
+3. Full offline recording:
+Handled via `MainViewModel._recording_chunks` to store immutable chunks of the
+received EMG history for full offline analysis.
