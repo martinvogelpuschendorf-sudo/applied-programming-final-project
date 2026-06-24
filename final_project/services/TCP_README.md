@@ -45,8 +45,6 @@ the server source and treat the built-in server as a local fallback.
 ## EMGTCPClient
 
 `EMGTCPClient` handles the client-side TCP connection and packet reconstruction.
-It is currently owned by `TCPAcquisitionWorker` in the ViewModel layer so socket
-polling runs outside the GUI thread.
 
 ### `__init__(host='localhost', port=12345)`
 
@@ -74,8 +72,7 @@ If the server closes the connection, this method disconnects the client cleanly.
 
 ### `get_latest_live_data()`
 
-Returns the decoded data accumulated since the previous call and clears the
-live read pointer.
+Returns all newly received packets since the previous call and advances the live read pointer.
 
 The returned array has shape:
 
@@ -94,27 +91,39 @@ processing, but this client method is still available on the service.
 
 ### `disconnect()`
 
-Closes the active socket and resets the client connection state.
+Closes the active socket and resets the client connection state. 
+Recorded packets are intentionally preserved after disconnect so they remain available for offline analysis and plotting.
+
+## Data Buffering Design (Runtime Flow)
+
+Buffering is handled inside `EMGTCPClient` in the service layer.
+
+**Byte buffer** (`byte_buffer: bytearray`): Raw bytes received from the
+socket accumulate here. `_extract_packets()` consumes complete 4608-byte
+frames from the front and leaves any incomplete trailing bytes in place.
+
+**Packet store** (`all_packets: list[ndarray]`): 
+Each reconstructed (32,18) frame is appended here by _extract_packets().
+This list grows for the entire duration of a recording session and is not truncated during streaming.
+It is cleared only when clear_buffers() is explicitly called.
+
+**Live read pointer** (`live_pointer: int`): An index into `all_packets`.
+`get_latest_live_data()` slices `all_packets[live_pointer:]`, advances the
+pointer to the current end of the list, and returns only the frames added
+since the previous poll, giving the VisPy view an incremental update each
+tick.
+
+**Offline access** (`get_all_offline_data()`): Concatenates every frame in all_packets into a single (32, Total Samples) array for Matplotlib analysis after the session ends.
+If no packets have been recorded, an empty (32,0) array is returned and a warning signal is emitted.
+
+**Reset** (`clear_buffers()`): Clears `byte_buffer` and `all_packets`,
+and resets `live_pointer` to zero so a new recording session starts from
+a clean state.
+
 
 ## EMGTCPServer
 
-`EMGTCPServer` is the built-in local demo server. It streams 32-channel EMG
-packets to any connected local client.
+`EMGTCPServer` is the built-in local demo server. It streams 32-channel EMG packets to any connected local client.
 
-It first tries to load the provided `recording.pkl`. If that file is not
-available, it generates a synthetic EMG-like signal so the GUI can still be
-tested.
-
-Again, this server is for local testing/demo. The main project requirement is 
-that the app can connect as a client to the provided exercise TCP server.
-
-## Data Buffering Design (Runtime Flow)
-To keep the application simple and lightweight, data buffering is handled 
-directly within the runtime path by the ViewModel layer, avoiding redundant manager classes:
-
-1. Live Rolling Buffer: 
-Handled via `MainViewModel.live_raw_data[:, -live_window_samples:]` to slice out the newest 
-samples required for real-time VisPy visualization.
-
-2. Full Offline Recording: Handled via `MainViewModel._recording_chunks` to store the entire 
-history of received EMG blocks for full offline analysis.
+It requires `recording.pkl` to be available. If the file is not found, the
+demo server will start but transmit no data.
