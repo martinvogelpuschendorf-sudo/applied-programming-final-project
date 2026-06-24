@@ -16,7 +16,7 @@ Group number: Group01
 | --- | --- |
 | YU-HSUAN KUO | TCP communication, packet reconstruction, buffering, TCP error handling |
 | Martin VOGEL | PySide6 GUI, live VisPy plotting, channel controls, all-channel view |
-| Lan Luo | Signal processing modes, offline Matplotlib inspection, documentation |
+| Lan Luo | Signal processing modes, offline Matplotlib inspection, documentation, GitHub issue/project coordination, PR review, and final integration support |
 
 ## Main Features
 
