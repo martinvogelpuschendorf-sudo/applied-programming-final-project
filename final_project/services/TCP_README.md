@@ -72,7 +72,8 @@ If the server closes the connection, this method disconnects the client cleanly.
 
 ### `get_latest_live_data()`
 
-Returns all newly received packets since the previous call and advances the live read pointer.
+Returns all newly received packets since the previous call and advances the
+live read pointer.
 
 The returned array has shape:
 
@@ -91,39 +92,58 @@ processing, but this client method is still available on the service.
 
 ### `disconnect()`
 
-Closes the active socket and resets the client connection state. 
-Recorded packets are intentionally preserved after disconnect so they remain available for offline analysis and plotting.
+Closes the active socket and resets the client connection state. Recorded
+packets are intentionally preserved after disconnect so they remain available
+for offline analysis and plotting.
 
 ## Data Buffering Design (Runtime Flow)
 
-Buffering is handled inside `EMGTCPClient` in the service layer.
+Buffering is split between the TCP service and the ViewModel runtime path.
 
-**Byte buffer** (`byte_buffer: bytearray`): Raw bytes received from the
-socket accumulate here. `_extract_packets()` consumes complete 4608-byte
-frames from the front and leaves any incomplete trailing bytes in place.
+**Byte buffer** (`EMGTCPClient.byte_buffer`): Raw bytes received from the
+socket accumulate here. `_extract_packets()` consumes complete 4608-byte frames
+from the front and leaves any incomplete trailing bytes in place.
 
-**Packet store** (`all_packets: list[ndarray]`): 
-Each reconstructed (32,18) frame is appended here by _extract_packets().
-This list grows for the entire duration of a recording session and is not truncated during streaming.
-It is cleared only when clear_buffers() is explicitly called.
+**Packet store** (`EMGTCPClient.all_packets`): Each reconstructed `(32, 18)`
+frame is appended here by `_extract_packets()`. This list grows for the entire
+duration of a recording session and is not truncated during streaming.
 
-**Live read pointer** (`live_pointer: int`): An index into `all_packets`.
+**Live read pointer** (`EMGTCPClient.live_pointer`): An index into `all_packets`.
 `get_latest_live_data()` slices `all_packets[live_pointer:]`, advances the
 pointer to the current end of the list, and returns only the frames added
-since the previous poll, giving the VisPy view an incremental update each
-tick.
+since the previous poll.
 
-**Offline access** (`get_all_offline_data()`): Concatenates every frame in all_packets into a single (32, Total Samples) array for Matplotlib analysis after the session ends.
-If no packets have been recorded, an empty (32,0) array is returned and a warning signal is emitted.
+**Live rolling display buffer** (`MainViewModel.live_raw_data`): The ViewModel
+keeps the newest samples needed for real-time VisPy visualization with
+`live_raw_data[:, -live_window_samples:]`.
 
-**Reset** (`clear_buffers()`): Clears `byte_buffer` and `all_packets`,
-and resets `live_pointer` to zero so a new recording session starts from
-a clean state.
+**Full offline recording** (`MainViewModel._recording_chunks`): The ViewModel
+stores immutable chunks of the received EMG history for offline Matplotlib
+analysis.
 
+**Offline access** (`EMGTCPClient.get_all_offline_data()`): Concatenates every
+frame in `all_packets` into a single `(32, Total Samples)` array. The current
+GUI uses the ViewModel recording chunks for offline plotting, but this service
+method remains available.
+
+**Reset** (`EMGTCPClient.clear_buffers()`): Clears `byte_buffer` and
+`all_packets`, and resets `live_pointer` to zero so a new recording session
+starts from a clean state.
 
 ## EMGTCPServer
 
-`EMGTCPServer` is the built-in local demo server. It streams 32-channel EMG packets to any connected local client.
+`EMGTCPServer` is the built-in local demo server. It streams 32-channel EMG
+packets to any connected local client.
 
-It requires `recording.pkl` to be available. If the file is not found, the
-demo server will start but transmit no data.
+It first tries to load the project-local demo recording:
+
+```text
+final_project/data/recording.pkl
+```
+
+If that file is not available, the server can still start and listen for
+clients, but it does not send signal packets. In that case the GUI shows a
+warning that the server is not sending data.
+
+Again, this server is for local testing/demo. The main project requirement is
+that the app can connect as a client to the provided exercise TCP server.
