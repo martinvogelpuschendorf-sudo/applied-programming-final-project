@@ -26,11 +26,27 @@ class EMGTCPClient(QObject):
         self.all_packets = []
         self.live_pointer = 0
 
+    # Input Validation (TCP communication)
+    def _is_valid_port(self, port):
+        """
+        Check that port is an integer within the valid TCP port range (1-65535).
+        Rejects non-integer types (e.g. None, str, float) and booleans.
+        """
+        return isinstance(port, int) and not isinstance(port, bool) and 0 < port <= 65535
+
     # Connection Control (TCP communication)
     def connect(self):
 
         if self.is_connected:
             return True
+
+        if not self._is_valid_port(self.port):
+            self.status_updated.emit(
+                f"Connection failed: invalid port {self.port!r}. "
+                f"Port must be an integer between 1 and 65535."
+            )
+            return False
+
         try:
             self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.client_socket.connect((self.host, self.port))
@@ -64,6 +80,10 @@ class EMGTCPClient(QObject):
                 pass
             self.client_socket = None
         self.status_updated.emit("Client disconnected. Playback finished.")  # Notify front-end of secure disconnection
+
+        # Handle no data available: warn immediately if this session produced zero complete packets
+        if not self.all_packets:
+            self.no_data_warning.emit("No data recorded during this session.")
 
     # Data Retrieval & Streaming Interface (TCP communication)
     def receive_data(self):
@@ -116,6 +136,11 @@ class EMGTCPClient(QObject):
         """
         For VisPy rolling time window
         Returns all new data segments accumulated since the last read and advances the read pointer.
+
+        Returns an empty (32, 0) array when nothing new has arrived yet. This is
+        expected during normal polling, so it does NOT emit no_data_warning;
+        that signal is reserved for "no data at all" cases (see disconnect()
+        and get_all_offline_data()).
         """
         current_len = len(self.all_packets)
         if self.live_pointer >= current_len:
