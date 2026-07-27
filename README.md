@@ -12,11 +12,11 @@ be inspected offline with Matplotlib.
 
 Group number: Group01
 
-| Member | Main responsibility |
-| --- | --- |
-| YU-HSUAN KUO | TCP communication, packet reconstruction, buffering, TCP error handling |
-| Martin VOGEL | PySide6 GUI, live VisPy plotting, channel controls, all-channel view |
-| Lan Luo | Signal processing modes, offline Matplotlib inspection, documentation, GitHub issue/project coordination, PR review, and final integration support |
+| Member | Matrikelnummer | IdM | Main responsibility |
+| --- | --- | --- | --- |
+| YU-HSUAN KUO | 23876473 | wi43cofi | TCP communication, packet reconstruction, buffering, TCP error handling |
+| Martin VOGEL | 21118604 | yx96eheg | PySide6 GUI, live VisPy plotting, channel controls, all-channel view |
+| Luo Lan | 23767933 | lu47fewe | Signal processing modes, offline Matplotlib inspection, documentation, GitHub issue/project coordination, PR review, and final integration support |
 
 ## Main Features
 
