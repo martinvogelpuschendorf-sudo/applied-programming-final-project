@@ -320,7 +320,7 @@ class VisPySignalPlot(QWidget):
         for row_index, channel_index in enumerate(valid_indices):
             row = visible_data[channel_index]
             centered = row - np.nanmedian(row)
-            scale = self.default_y_scale
+            scale = self._stable_all_channel_scale(channel_index, centered)
             y_values = centered / scale + offsets[row_index]
             points = np.column_stack((display_x, y_values))
             self.lines[row_index].set_data(
