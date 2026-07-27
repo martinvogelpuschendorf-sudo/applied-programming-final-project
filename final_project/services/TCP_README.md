@@ -41,6 +41,8 @@ the server source and treat the built-in server as a local fallback.
 - The connect action no longer starts the demo server automatically.
 - A changed port works only if an external server or the explicitly started
   local demo server is listening on that port.
+- An invalid port value is rejected immediately, before any socket is opened,
+  with a status message shown instead of a crash.
 
 ## EMGTCPClient
 
@@ -49,7 +51,7 @@ the server source and treat the built-in server as a local fallback.
 ### `__init__(host='localhost', port=12345)`
 
 Initializes the client endpoint, byte buffers, decoded sample buffer, and packet
-size configuration.
+size configuration. Port validity is checked in `connect()`, not here.
 
 The expected packet size is:
 
@@ -57,10 +59,23 @@ The expected packet size is:
 32 channels x 18 samples x 8 bytes = 4608 bytes
 ```
 
+### `_is_valid_port(port)`
+
+Checks that `port` is an integer between 1 and 65535. Called at the start of
+`connect()`, before any socket is created.
+
+**Handles:** Handle invalid port input
+
 ### `connect()`
 
-Opens the TCP socket and switches it to non-blocking mode. Non-blocking mode is
-important because socket reads should never freeze the GUI.
+Validates the port first; an invalid port is rejected with a status message
+before any socket is created. Otherwise, opens the TCP socket and switches it
+to non-blocking mode. Non-blocking mode is important because socket reads
+should never freeze the GUI. Connection failures (e.g. server not running)
+are caught and reported via `status_updated` instead of raising.
+
+**Handles:** Handle invalid port input, Handle server not running, Show
+status messages in the GUI instead of crashing
 
 ### `receive_data()`
 
@@ -68,7 +83,12 @@ Drains all currently available bytes from the socket and appends them to the
 internal byte buffer. It handles packet fragmentation and clumped packets by
 extracting only complete 4608-byte frames.
 
-If the server closes the connection, this method disconnects the client cleanly.
+If the server closes the connection, this method disconnects the client
+cleanly. If a read error occurs instead (lost connection), it is caught,
+reported via `status_updated`, and the client disconnects.
+
+**Handles:** Handle lost TCP connection, Show status messages in the GUI
+instead of crashing
 
 ### `get_latest_live_data()`
 
@@ -84,17 +104,30 @@ The returned array has shape:
 where `32` is the number of EMG channels and `N` is the number of samples
 received during that polling interval.
 
+If nothing new has arrived, this returns an empty `(32, 0)` array without
+emitting `no_data_warning` — that's normal during polling, not an error.
+
 ### `get_all_offline_data()`
 
 Returns the full historical packet buffer as one `(32, Total Samples)` array.
 The current ViewModel stores its own immutable recording chunks for offline
 processing, but this client method is still available on the service.
 
+If no packets were recorded, it emits `no_data_warning` instead of returning
+nothing silently.
+
+**Handles:** Handle no data available
+
 ### `disconnect()`
 
 Closes the active socket and resets the client connection state. Recorded
 packets are intentionally preserved after disconnect so they remain available
-for offline analysis and plotting.
+for offline analysis and plotting. If the session recorded zero packets,
+`no_data_warning` is emitted here too, in addition to the check already in
+`get_all_offline_data()`.
+
+**Handles:** Handle no data available, Show status messages in the GUI
+instead of crashing
 
 ## Data Buffering Design (Runtime Flow)
 

@@ -48,6 +48,7 @@ class TCPAcquisitionWorker(QObject):
         self.stop()
         self._client = EMGTCPClient(host, port)
         self._client.status_updated.connect(self.status_updated)
+        self._client.no_data_warning.connect(self.status_updated)
         self._client.connect()
         self._last_channel_count = 0
 
